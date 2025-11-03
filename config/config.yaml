@@ -1,0 +1,87 @@
+# ESG Event-Driven Alpha Strategy Configuration
+
+# Data Sources
+data:
+  # SEC Filing Configuration
+  sec:
+    company_name: "ESGQuantResearch"
+    email: "research@example.com"  # REQUIRED: Your email for SEC EDGAR
+    download_folder: "./data/raw/sec_filings"
+    filing_types: ["8-K", "10-K", "10-Q"]
+
+  # Price Data Configuration
+  prices:
+    source: "yfinance"  # yfinance, polygon, quandl
+    data_folder: "./data/processed/prices"
+
+  # Social Media Configuration (OPTIONAL - requires API keys)
+  social_media:
+    twitter_api_key: ""  # Optional: Twitter API key
+    twitter_bearer_token: ""  # Optional: Twitter bearer token
+    reddit_client_id: ""  # Optional: Reddit client ID
+    reddit_client_secret: ""  # Optional: Reddit secret
+
+  # Fama-French Factors
+  factors:
+    data_folder: "./data/processed/factors"
+    frequency: "daily"  # daily or monthly
+
+# NLP Configuration
+nlp:
+  # Event Detection
+  event_detector:
+    type: "rule_based"  # rule_based or ml
+    ml_model: "yiyanghkust/finbert-esg"  # Only used if type=ml
+    confidence_threshold: 0.3
+
+  # Sentiment Analysis
+  sentiment_analyzer:
+    model: "ProsusAI/finbert"  # ProsusAI/finbert, yiyanghkust/finbert-tone
+    batch_size: 32
+
+# Signal Generation
+signals:
+  # Composite Score Weights
+  weights:
+    event_severity: 0.3
+    intensity: 0.4
+    volume: 0.2
+    duration: 0.1
+
+  # Signal Parameters
+  lookback_window: 252  # Days for z-score calculation
+
+# Portfolio Construction
+portfolio:
+  strategy_type: "long_short"  # long_short, long_only, short_only
+  method: "quintile"  # quintile or z_score
+  max_position: 0.1  # Maximum position size (10%)
+  rebalance_frequency: "W"  # D, W, M (daily, weekly, monthly)
+  holding_period: 10  # Days
+
+# Backtesting Configuration
+backtest:
+  initial_capital: 1000000.0  # Starting capital ($1M)
+  commission_pct: 0.0005  # 5 basis points
+  slippage_bps: 3  # 3 basis points
+  start_date: "2020-01-01"
+  end_date: "2023-12-31"
+
+# Universe Configuration
+universe:
+  index: "SP500"  # SP500, Russell1000, custom
+  min_market_cap: 1000000000  # $1B minimum
+  min_liquidity: 1000000  # $1M average daily volume
+
+# Output Configuration
+output:
+  results_folder: "./results"
+  figures_folder: "./results/figures"
+  tear_sheets_folder: "./results/tear_sheets"
+  factor_analysis_folder: "./results/factor_analysis"
+  save_format: "pickle"  # pickle, json, csv
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_file: "./logs/esg_strategy.log"

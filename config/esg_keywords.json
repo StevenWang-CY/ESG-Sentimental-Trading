@@ -1,0 +1,101 @@
+{
+  "environmental": {
+    "positive": [
+      "renewable energy",
+      "carbon neutral",
+      "emissions reduction",
+      "clean energy investment",
+      "environmental certification",
+      "sustainability initiative",
+      "green energy",
+      "solar power",
+      "wind power",
+      "carbon offset",
+      "environmental award",
+      "zero emissions",
+      "climate action",
+      "sustainable practices"
+    ],
+    "negative": [
+      "environmental fine",
+      "EPA violation",
+      "pollution incident",
+      "oil spill",
+      "emissions scandal",
+      "hazardous waste",
+      "environmental lawsuit",
+      "toxic waste",
+      "air pollution",
+      "water pollution",
+      "environmental damage",
+      "climate lawsuit",
+      "environmental penalty",
+      "pollution violation"
+    ]
+  },
+  "social": {
+    "positive": [
+      "diversity initiative",
+      "employee benefit expansion",
+      "community investment",
+      "fair wage increase",
+      "workplace safety",
+      "employee wellness",
+      "diversity and inclusion",
+      "equal pay",
+      "labor rights",
+      "community program",
+      "charitable donation",
+      "employee satisfaction",
+      "work-life balance"
+    ],
+    "negative": [
+      "discrimination lawsuit",
+      "labor dispute",
+      "worker safety violation",
+      "data breach",
+      "privacy violation",
+      "product recall",
+      "sexual harassment",
+      "wage theft",
+      "child labor",
+      "human rights violation",
+      "unsafe working conditions",
+      "customer data leak",
+      "privacy breach",
+      "security breach",
+      "labor strike"
+    ]
+  },
+  "governance": {
+    "positive": [
+      "board diversity",
+      "anti-corruption policy",
+      "executive compensation reform",
+      "corporate governance",
+      "transparency initiative",
+      "ethics program",
+      "compliance program",
+      "shareholder rights",
+      "board independence",
+      "whistleblower protection"
+    ],
+    "negative": [
+      "insider trading",
+      "accounting scandal",
+      "bribery charges",
+      "shareholder lawsuit",
+      "SEC investigation",
+      "fraud",
+      "corruption",
+      "embezzlement",
+      "money laundering",
+      "financial restatement",
+      "audit failure",
+      "conflict of interest",
+      "executive misconduct",
+      "accounting irregularities",
+      "regulatory investigation"
+    ]
+  }
+}

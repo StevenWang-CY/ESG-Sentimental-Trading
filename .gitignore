@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Data files
+data/raw/*
+data/processed/*
+data/signals/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/signals/.gitkeep
+
+# Results
+results/figures/*
+results/tear_sheets/*
+results/factor_analysis/*
+!results/figures/.gitkeep
+!results/tear_sheets/.gitkeep
+!results/factor_analysis/.gitkeep
+
+# Logs
+logs/
+*.log
+
+# API Keys (IMPORTANT: Never commit API keys!)
+config/secrets.yaml
+.env
+*.key
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Model files (large files)
+*.bin
+*.pt
+*.pth
+models/
+
+# Temporary files
+*.tmp
+*.bak
+temp/
