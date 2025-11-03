@@ -159,7 +159,16 @@ class PortfolioConstructor:
             Dictionary with statistics
         """
         if portfolio.empty:
-            return {'n_positions': 0}
+            return {
+                'n_positions': 0,
+                'n_long': 0,
+                'n_short': 0,
+                'total_long_weight': 0.0,
+                'total_short_weight': 0.0,
+                'net_exposure': 0.0,
+                'gross_exposure': 0.0,
+                'avg_position_size': 0.0
+            }
 
         long_positions = portfolio[portfolio['weight'] > 0]
         short_positions = portfolio[portfolio['weight'] < 0]

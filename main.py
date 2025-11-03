@@ -198,6 +198,13 @@ def main():
         stats = portfolio_constructor.get_portfolio_statistics(portfolio)
         logger.info(f"Portfolio: {stats['n_long']} long, {stats['n_short']} short")
 
+        # Check if portfolio is empty
+        if stats['n_positions'] == 0:
+            logger.warning("No positions in portfolio. Cannot run backtest.")
+            logger.info("\nThis is expected when using mock data with strict event detection.")
+            logger.info("To see the strategy in action, try: python main.py --mode demo")
+            return
+
     # Phase 4: Backtesting
     if args.mode in ['full', 'backtest_only']:
         logger.info("\n>>> PHASE 4: BACKTESTING")
@@ -282,23 +289,31 @@ def run_demo(args, config, logger):
 
     signals_list = []
 
-    for ticker in args.tickers[:3]:  # Use first 3 tickers
+    for i, ticker in enumerate(args.tickers[:5]):  # Use first 5 tickers for proper quintile distribution
         event_date = datetime.strptime(args.start_date, '%Y-%m-%d') + timedelta(days=30)
 
-        # Mock event
+        # Mock event with dramatically varying confidence levels to create wide score distribution
+        confidence_levels = [0.95, 0.70, 0.50, 0.40, 0.30]  # High to very low
         event_result = {
             'has_event': True,
             'category': 'E',
-            'confidence': 0.8,
+            'confidence': confidence_levels[i],
             'sentiment': 'negative'
         }
 
-        # Mock reaction
+        # Mock reaction with varying sentiment intensities
+        sentiment_biases = ['very_negative', 'negative', 'neutral', 'slightly_positive', 'positive']
         mock_tweets = feature_extractor.create_mock_social_data(
-            ticker, event_date, n_tweets=100, sentiment_bias='negative'
+            ticker, event_date, n_tweets=100, sentiment_bias=sentiment_biases[i] if i < 2 else 'negative'
         )
 
         reaction_features = feature_extractor.extract_features(mock_tweets, event_date)
+
+        # Artificially vary the features dramatically to create full quintile distribution
+        if i < 5:
+            reaction_features['intensity'] = -0.95 + (i * 0.475)  # Range from -0.95 to 0.95
+            reaction_features['volume_ratio'] = 0.5 + (i * 4.0)  # Range from 0.5 to 16.5
+            reaction_features['duration_days'] = 1 + (i * 3)  # Range from 1 to 13
 
         # Generate signal
         signal = signal_generator.compute_signal(
@@ -312,10 +327,20 @@ def run_demo(args, config, logger):
 
     signals_df = pd.DataFrame(signals_list)
     logger.info(f"Generated {len(signals_df)} mock signals")
+    logger.info(f"Signal quintiles: {signals_df['quintile'].tolist()}")
+    logger.info(f"Signal scores: {signals_df['raw_score'].tolist()}")
 
     # Construct portfolio
     portfolio_constructor = PortfolioConstructor(strategy_type='long_short')
     portfolio = portfolio_constructor.construct_portfolio(signals_df, method='quintile')
+
+    stats = portfolio_constructor.get_portfolio_statistics(portfolio)
+    logger.info(f"Portfolio: {stats['n_long']} long, {stats['n_short']} short positions")
+
+    if portfolio.empty:
+        logger.warning("Portfolio is empty - no positions to backtest!")
+        logger.info("This may happen if all signals have the same quintile.")
+        return
 
     # Run backtest
     logger.info("Running backtest...")
