@@ -1,12 +1,24 @@
 """
 Backtesting Engine
-Simulates strategy performance on historical data
+Simulates strategy performance on historical data with comprehensive risk management
 """
 
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).parent.parent))
+
+try:
+    from risk import RiskManager, DrawdownController
+    RISK_MANAGEMENT_AVAILABLE = True
+except ImportError:
+    RISK_MANAGEMENT_AVAILABLE = False
+    print("Warning: Risk management modules not available")
 
 
 class BacktestEngine:
@@ -15,25 +27,53 @@ class BacktestEngine:
     """
 
     def __init__(self, prices: pd.DataFrame, initial_capital: float = 1000000.0,
-                 commission_pct: float = 0.0005, slippage_bps: float = 3):
+                 commission_pct: float = 0.0005, slippage_bps: float = 3,
+                 enable_risk_management: bool = True,
+                 max_position_size: float = 0.10,
+                 target_volatility: float = 0.12,
+                 max_drawdown_threshold: float = 0.15):
         """
-        Initialize backtest engine
+        Initialize backtest engine with risk management
 
         Args:
             prices: Price DataFrame with multi-index (date, ticker)
             initial_capital: Starting capital
             commission_pct: Commission as percentage (e.g., 0.0005 = 5 bps)
             slippage_bps: Slippage in basis points
+            enable_risk_management: Enable comprehensive risk controls
+            max_position_size: Maximum single position size (10%)
+            target_volatility: Target portfolio volatility (12% annualized)
+            max_drawdown_threshold: Maximum acceptable drawdown (15%)
         """
         self.prices = prices
         self.initial_capital = initial_capital
         self.commission_pct = commission_pct
         self.slippage_bct = slippage_bps / 10000
+        self.enable_risk_management = enable_risk_management and RISK_MANAGEMENT_AVAILABLE
 
         self.portfolio_value = []
         self.positions = []
         self.trades = []
         self.daily_returns = []
+        self.cash = initial_capital  # Track cash separately
+
+        # Initialize risk management
+        if self.enable_risk_management:
+            self.risk_manager = RiskManager(
+                max_position_size=max_position_size,
+                target_volatility=target_volatility,
+                max_drawdown_threshold=max_drawdown_threshold,
+                min_positions=5  # Minimum diversification
+            )
+            self.drawdown_controller = DrawdownController(
+                drawdown_thresholds=[-0.05, -0.10, -0.15, -0.20],
+                exposure_levels=[0.9, 0.75, 0.60, 0.50]
+            )
+            print(f"Risk management enabled: max_pos={max_position_size:.1%}, "
+                  f"target_vol={target_volatility:.1%}, max_dd={max_drawdown_threshold:.1%}")
+        else:
+            self.risk_manager = None
+            self.drawdown_controller = None
 
     def run(self, signals: pd.DataFrame, rebalance_freq: str = 'W',
             holding_period: int = 10) -> 'BacktestResult':
@@ -60,7 +100,7 @@ class BacktestEngine:
         rebalance_dates = self._get_rebalance_dates(signals, rebalance_freq)
 
         # Initialize tracking
-        capital = self.initial_capital
+        cash = self.initial_capital
         current_positions = {}
         portfolio_values = []
         returns = []
@@ -73,16 +113,22 @@ class BacktestEngine:
 
         # Simulate trading
         for i, date in enumerate(all_dates):
+            # Calculate current portfolio value BEFORE rebalancing
+            portfolio_value_before = self._calculate_portfolio_value_correct(
+                date, current_positions, cash
+            )
+
             # Check if we should rebalance
             if date in rebalance_dates:
-                current_positions = self._rebalance(
-                    date, signals, current_positions, capital
+                current_positions, cash = self._rebalance_with_cash(
+                    date, signals, current_positions, cash, portfolio_value_before
                 )
 
-            # Calculate portfolio value
-            portfolio_value = self._calculate_portfolio_value(
-                date, current_positions, capital
+            # Calculate portfolio value AFTER rebalancing
+            portfolio_value = self._calculate_portfolio_value_correct(
+                date, current_positions, cash
             )
+
             portfolio_values.append({
                 'date': date,
                 'value': portfolio_value
@@ -93,9 +139,7 @@ class BacktestEngine:
                 prev_value = portfolio_values[i-1]['value']
                 ret = (portfolio_value - prev_value) / prev_value if prev_value > 0 else 0
                 returns.append({'date': date, 'return': ret})
-
-            # Update capital (mark-to-market)
-            capital = portfolio_value
+                self.daily_returns.append({'date': date, 'return': ret})
 
         # Create result
         result = BacktestResult(
@@ -113,16 +157,58 @@ class BacktestEngine:
         signal_dates = signals['date'].unique()
         return sorted(signal_dates)
 
-    def _rebalance(self, date: datetime, signals: pd.DataFrame,
-                   current_positions: Dict, capital: float) -> Dict:
-        """Execute rebalancing"""
+    def _rebalance_with_cash(self, date: datetime, signals: pd.DataFrame,
+                             current_positions: Dict, cash: float,
+                             portfolio_value: float) -> tuple:
+        """Execute rebalancing with proper cash tracking"""
+        # First, liquidate all current positions
+        for ticker, position in current_positions.items():
+            price = self._get_price(date, ticker)
+            if price:
+                # Sell/cover position
+                proceeds = position['shares'] * price
+                # For longs: get cash back
+                # For shorts: pay cash to cover
+                cash += proceeds
+                # Apply transaction costs
+                cash -= abs(proceeds) * (self.commission_pct + self.slippage_bct)
+
         # Get target weights for this date
-        target_signals = signals[signals['date'] == date]
+        target_signals = signals[signals['date'] == date].copy()
 
         if target_signals.empty:
-            return current_positions
+            return {}, cash
 
-        # Calculate target positions
+        # Apply risk management if enabled
+        if self.enable_risk_management and self.risk_manager is not None:
+            # Calculate returns history for volatility targeting
+            if len(self.daily_returns) > 0:
+                returns_series = pd.Series([r['return'] for r in self.daily_returns])
+            else:
+                returns_series = None
+
+            # Apply comprehensive risk controls
+            target_signals = self.risk_manager.apply_risk_controls(
+                portfolio=target_signals,
+                prices=self.prices,
+                current_capital=portfolio_value,
+                returns_history=returns_series
+            )
+
+            # Apply drawdown-based exposure reduction
+            if self.drawdown_controller is not None:
+                target_signals = self.drawdown_controller.apply_to_portfolio(
+                    portfolio=target_signals,
+                    current_value=portfolio_value
+                )
+
+            # Check for trading halt conditions
+            if self.drawdown_controller.should_halt_trading():
+                print(f"WARNING: Trading halted at {date} due to extreme conditions!")
+                print(f"Drawdown metrics: {self.drawdown_controller.get_drawdown_metrics()}")
+                return {}, cash  # Exit all positions
+
+        # Calculate target positions using portfolio value (not just cash)
         new_positions = {}
 
         for _, row in target_signals.iterrows():
@@ -135,14 +221,20 @@ class BacktestEngine:
             if price is None or price <= 0:
                 continue
 
-            # Calculate target dollar amount
-            target_value = capital * weight
+            # Calculate target dollar amount based on portfolio value
+            target_value = portfolio_value * weight
 
             # Calculate shares (accounting for transaction costs)
             if target_value > 0:
+                # Long position
                 shares = int(target_value / (price * (1 + self.commission_pct + self.slippage_bct)))
+                cost = shares * price * (1 + self.commission_pct + self.slippage_bct)
+                cash -= cost
             else:
+                # Short position (negative shares)
                 shares = int(target_value / (price * (1 - self.commission_pct - self.slippage_bct)))
+                proceeds = abs(shares) * price * (1 - self.commission_pct - self.slippage_bct)
+                cash += proceeds
 
             if shares != 0:
                 new_positions[ticker] = {
@@ -160,19 +252,66 @@ class BacktestEngine:
                     'value': shares * price
                 })
 
-        return new_positions
+        return new_positions, cash
+
+    def _calculate_portfolio_value_correct(self, date: datetime,
+                                           positions: Dict, cash: float) -> float:
+        """
+        Calculate total portfolio value correctly
+
+        For long-short:
+        Net Liquidation Value = Cash + Long Market Value - Short Market Value
+        """
+        long_value = 0
+        short_value = 0
+
+        for ticker, position in positions.items():
+            price = self._get_price(date, ticker)
+            if price and price > 0:
+                market_value = position['shares'] * price
+                if position['shares'] > 0:
+                    # Long position contributes positively
+                    long_value += market_value
+                else:
+                    # Short position is a liability (negative shares)
+                    short_value += abs(market_value)
+
+        # Net Liquidation Value
+        total_value = cash + long_value - short_value
+
+        return total_value
 
     def _calculate_portfolio_value(self, date: datetime,
                                    positions: Dict, cash: float) -> float:
-        """Calculate total portfolio value"""
-        total_value = 0
+        """
+        Calculate total portfolio value including cash and positions
+
+        For long-short strategies:
+        - Cash starts at initial_capital
+        - Long positions: cash decreases by purchase amount, increases by sale proceeds
+        - Short positions: cash increases by short proceeds, decreases by cover amount
+        - Portfolio value = cash + sum(long position values) - sum(short position values)
+        """
+        # Calculate position values
+        long_value = 0
+        short_value = 0
 
         for ticker, position in positions.items():
             price = self._get_price(date, ticker)
             if price:
-                total_value += position['shares'] * price
+                position_value = position['shares'] * price
+                if position['shares'] > 0:
+                    long_value += position_value
+                else:
+                    short_value += abs(position_value)  # Short positions are negative shares
 
-        return total_value if total_value > 0 else cash
+        # For long-short: total value = initial capital + P&L from both long and short
+        # P&L from longs = current_long_value - cash_spent_on_longs
+        # P&L from shorts = cash_from_shorts - cost_to_cover_shorts
+        # Simplified: track net liquidation value
+        total_value = cash + long_value - short_value
+
+        return total_value
 
     def _get_price(self, date: datetime, ticker: str,
                    price_type: str = 'Close') -> Optional[float]:
@@ -181,18 +320,26 @@ class BacktestEngine:
             if isinstance(self.prices.index, pd.MultiIndex):
                 price_data = self.prices.xs(ticker, level='ticker')
                 if date in price_data.index:
-                    return price_data.loc[date, price_type]
+                    result = price_data.loc[date, price_type]
+                    # Handle case where result is a Series (multiple rows for same date)
+                    if isinstance(result, pd.Series):
+                        return float(result.iloc[0])
+                    return float(result)
                 else:
                     # Try to find nearest date
-                    nearest_date = price_data.index[price_data.index >= date].min()
-                    if pd.notna(nearest_date):
-                        return price_data.loc[nearest_date, price_type]
+                    future_dates = price_data.index[price_data.index >= date]
+                    if len(future_dates) > 0:
+                        nearest_date = future_dates.min()
+                        result = price_data.loc[nearest_date, price_type]
+                        if isinstance(result, pd.Series):
+                            return float(result.iloc[0])
+                        return float(result)
             else:
                 if date in self.prices.index and ticker in self.prices.columns:
-                    return self.prices.loc[date, ticker]
+                    return float(self.prices.loc[date, ticker])
 
             return None
-        except:
+        except Exception as e:
             return None
 
     def _create_empty_result(self) -> 'BacktestResult':

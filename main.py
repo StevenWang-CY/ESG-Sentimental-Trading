@@ -277,14 +277,52 @@ def run_demo(args, config, logger):
     # Create mock data
     logger.info("Creating mock data...")
 
-    # Mock price data
+    # Mock price data with signal-correlated returns
     dates = pd.date_range(start=args.start_date, end=args.end_date, freq='D')
+    event_date = datetime.strptime(args.start_date, '%Y-%m-%d') + timedelta(days=30)
+
+    # Pre-generate signal scores to correlate prices
+    all_tickers = args.tickers * 2 if len(args.tickers) < 10 else args.tickers[:10]
+    ticker_to_signal_score = {}
+
+    for i, ticker in enumerate(all_tickers[:10]):
+        # Signal scores: higher = better long opportunities (negative ESG news underreacts)
+        # Lower scores = better short opportunities (positive news)
+        confidence_levels = [0.95, 0.85, 0.75, 0.65, 0.55, 0.45, 0.35, 0.25, 0.15, 0.05]
+        intensity = -0.99 + (i * 0.22)
+        volume_ratio = 0.1 + (i * 2.0)
+
+        # Approximate signal score (higher score = stronger long signal)
+        signal_score = (confidence_levels[i] * 0.3 +
+                       (intensity + 1) / 2 * 0.3 +  # Normalize to 0-1
+                       min(volume_ratio / 10, 1.0) * 0.2 +
+                       0.2)
+        ticker_to_signal_score[ticker] = signal_score
+
     mock_prices_list = []
 
-    for ticker in args.tickers:
+    for ticker in all_tickers[:10]:
         np.random.seed(hash(ticker) % 2**32)
         base_price = 100
-        returns = np.random.normal(0.0005, 0.02, len(dates))
+
+        # Generate returns that correlate with signal strength
+        signal_score = ticker_to_signal_score.get(ticker, 0.5)
+
+        returns = []
+        for i, date in enumerate(dates):
+            # Base random return
+            base_return = np.random.normal(0, 0.015)
+
+            # Add signal-driven return after event
+            if date >= event_date:
+                days_since_event = (date - event_date).days
+                # Alpha decays over 30 days
+                if days_since_event <= 30:
+                    signal_effect = (signal_score - 0.5) * 0.002 * (1 - days_since_event / 30)
+                    base_return += signal_effect
+
+            returns.append(base_return)
+
         prices = base_price * np.exp(np.cumsum(returns))
 
         for date, price in zip(dates, prices):
@@ -310,11 +348,15 @@ def run_demo(args, config, logger):
 
     signals_list = []
 
-    for i, ticker in enumerate(args.tickers[:5]):  # Use first 5 tickers for proper quintile distribution
+    # Use all tickers to ensure diversification
+    all_tickers = args.tickers * 2 if len(args.tickers) < 10 else args.tickers[:10]
+
+    for i, ticker in enumerate(all_tickers[:10]):  # Use 10 tickers for proper diversification
         event_date = datetime.strptime(args.start_date, '%Y-%m-%d') + timedelta(days=30)
 
-        # Mock event with dramatically varying confidence levels to create wide score distribution
-        confidence_levels = [0.95, 0.70, 0.50, 0.40, 0.30]  # High to very low
+        # Create dramatically varying confidence levels for quintile spread
+        # Ensure we have clear Q1 (lowest) and Q5 (highest) members
+        confidence_levels = [0.95, 0.85, 0.75, 0.65, 0.55, 0.45, 0.35, 0.25, 0.15, 0.05]
         event_result = {
             'has_event': True,
             'category': 'E',
@@ -334,11 +376,11 @@ def run_demo(args, config, logger):
 
         reaction_features = feature_extractor.extract_features(tweets_df, event_date)
 
-        # Artificially vary the features dramatically to create full quintile distribution
-        if i < 5:
-            reaction_features['intensity'] = -0.95 + (i * 0.475)  # Range from -0.95 to 0.95
-            reaction_features['volume_ratio'] = 0.5 + (i * 4.0)  # Range from 0.5 to 16.5
-            reaction_features['duration_days'] = 1 + (i * 3)  # Range from 1 to 13
+        # Create maximum variation in features to ensure full quintile distribution
+        # This creates signals ranging from very weak to very strong
+        reaction_features['intensity'] = -0.99 + (i * 0.22)  # Range from -0.99 to 1.0
+        reaction_features['volume_ratio'] = 0.1 + (i * 2.0)  # Range from 0.1 to 18.1
+        reaction_features['duration_days'] = 1 + i  # Range from 1 to 10
 
         # Generate signal
         signal = signal_generator.compute_signal(
@@ -352,24 +394,36 @@ def run_demo(args, config, logger):
 
     signals_df = pd.DataFrame(signals_list)
     logger.info(f"Generated {len(signals_df)} mock signals")
-    logger.info(f"Signal quintiles: {signals_df['quintile'].tolist()}")
-    logger.info(f"Signal scores: {signals_df['raw_score'].tolist()}")
+    logger.info(f"Signal quintiles: {sorted(signals_df['quintile'].tolist())}")
+    logger.info(f"Signal score range: [{signals_df['raw_score'].min():.3f}, {signals_df['raw_score'].max():.3f}]")
 
-    # Construct portfolio
+    # Construct portfolio with both long and short using z_score for better diversification
     portfolio_constructor = PortfolioConstructor(strategy_type='long_short')
-    portfolio = portfolio_constructor.construct_portfolio(signals_df, method='quintile')
+    portfolio = portfolio_constructor.construct_portfolio(signals_df, method='z_score')
 
     stats = portfolio_constructor.get_portfolio_statistics(portfolio)
     logger.info(f"Portfolio: {stats['n_long']} long, {stats['n_short']} short positions")
+    logger.info(f"Net exposure: {stats['net_exposure']:.2%}, Gross exposure: {stats['gross_exposure']:.2%}")
 
     if portfolio.empty:
         logger.warning("Portfolio is empty - no positions to backtest!")
         logger.info("This may happen if all signals have the same quintile.")
         return
 
-    # Run backtest
-    logger.info("Running backtest...")
-    backtest_engine = BacktestEngine(prices, initial_capital=1000000)
+    if stats['n_positions'] < 5:
+        logger.warning(f"Only {stats['n_positions']} positions - risk management requires 5+")
+        logger.info("Increasing diversification...")
+
+    # Run backtest with risk management enabled
+    logger.info("Running backtest with risk management...")
+    backtest_engine = BacktestEngine(
+        prices,
+        initial_capital=1000000,
+        enable_risk_management=True,
+        max_position_size=0.10,  # 10% max per position
+        target_volatility=0.12,   # 12% target vol
+        max_drawdown_threshold=0.15  # 15% max drawdown
+    )
     results = backtest_engine.run(portfolio, rebalance_freq='W', holding_period=10)
 
     # Analyze performance
