@@ -118,10 +118,35 @@ python main.py --mode demo
 
 This will:
 1. Generate mock ESG events
-2. Create synthetic social media reactions
+2. Create synthetic Twitter reactions
 3. Generate trading signals
 4. Run backtest
 5. Display performance metrics
+
+### Production Mode (Real Data on NASDAQ-100)
+
+For running on real NASDAQ-100 stocks with real Twitter data:
+
+```bash
+# Test with 5 stocks first
+python run_production.py \
+    --start-date 2024-09-01 \
+    --end-date 2024-09-30 \
+    --universe custom \
+    --tickers AAPL MSFT GOOGL TSLA NVDA \
+    --save-data
+
+# Full NASDAQ-100 run
+python run_production.py \
+    --start-date 2024-09-01 \
+    --end-date 2024-09-30 \
+    --universe nasdaq100 \
+    --save-data
+```
+
+**📖 Complete deployment guide**: See [PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md)
+
+**✅ Quick checklist**: See [ACTION_CHECKLIST.md](ACTION_CHECKLIST.md)
 
 ### Full Pipeline
 
