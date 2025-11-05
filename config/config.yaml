@@ -14,12 +14,20 @@ data:
     source: "yfinance"  # yfinance, polygon, quandl
     data_folder: "./data/processed/prices"
 
-  # Social Media Configuration (OPTIONAL - requires API keys)
-  social_media:
-    twitter_api_key: ""  # Optional: Twitter API key
-    twitter_bearer_token: ""  # Optional: Twitter bearer token
-    reddit_client_id: ""  # Optional: Reddit client ID
-    reddit_client_secret: ""  # Optional: Reddit secret
+  # Twitter/X Data Configuration
+  twitter:
+    bearer_token: ""  # Twitter API v2 Bearer Token (get from developer.twitter.com)
+    use_mock: true  # Set to false when you have a real API token
+    max_tweets_per_ticker: 100
+    days_before_event: 3  # Days before event to collect tweets
+    days_after_event: 7  # Days after event to collect tweets
+    esg_keywords:  # ESG-related keywords to enhance search
+      - "ESG"
+      - "climate"
+      - "sustainability"
+      - "carbon emissions"
+      - "diversity"
+      - "governance"
 
   # Fama-French Factors
   factors:

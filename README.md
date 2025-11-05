@@ -1,15 +1,21 @@
 # ESG Event-Driven Alpha Strategy
 
-A quantitative trading strategy that exploits market inefficiencies around material ESG (Environmental, Social, Governance) events using NLP and sentiment analysis.
+A quantitative trading strategy that exploits market inefficiencies around material ESG (Environmental, Social, Governance) events using NLP and **Twitter/X sentiment analysis**.
 
 ## Executive Summary
 
 This project implements a **systematic alpha strategy** based on the hypothesis that markets systematically underreact to material ESG events in the medium term (5-30 trading days). The strategy:
 
 - **Detects** ESG events from SEC filings using NLP
-- **Analyzes** market reaction via sentiment analysis of social media
+- **Analyzes** market reaction via sentiment analysis of **Twitter/X data**
 - **Generates** trading signals from composite ESG Event Shock Scores
 - **Backtests** performance and proves alpha via Fama-French factor regression
+
+**Data Sources:**
+- **SEC EDGAR**: For ESG event detection (8-K, 10-K filings)
+- **Twitter/X API v2**: For real-time sentiment analysis and market reaction
+- **yfinance**: For price data and returns
+- **Fama-French Data Library**: For factor regression analysis
 
 **Target Performance:**
 - Sharpe Ratio: 1.2 - 1.8
@@ -187,36 +193,52 @@ python main.py \
 python main.py --mode backtest_only
 ```
 
-## API Keys (Optional)
+## Twitter/X API Setup (Optional for Real Data)
 
-For advanced features, you can add API keys to [config/config.yaml](config/config.yaml):
+The strategy uses **Twitter/X exclusively** for sentiment analysis. You have two options:
 
-### Twitter API (for social media sentiment)
+### Option 1: Mock Data (No API Key Required)
 
-```yaml
-social_media:
-  twitter_bearer_token: "YOUR_TOKEN_HERE"
+The strategy works out-of-the-box with realistic mock Twitter data for testing:
+
+```bash
+python main.py --mode demo  # Uses mock Twitter data automatically
 ```
 
-Apply for access: https://developer.twitter.com/
+### Option 2: Real Twitter Data
 
-### Reddit API (alternative to Twitter)
+For production use with real Twitter data, you need a Twitter API v2 Bearer Token:
+
+1. **Get Twitter API Access**: https://developer.twitter.com/
+2. **Configure in** [config/config.yaml](config/config.yaml):
 
 ```yaml
-social_media:
-  reddit_client_id: "YOUR_CLIENT_ID"
-  reddit_client_secret: "YOUR_SECRET"
+data:
+  twitter:
+    bearer_token: "YOUR_TWITTER_BEARER_TOKEN_HERE"
+    use_mock: false  # Set to false for real data
+    max_tweets_per_ticker: 100
+    days_before_event: 3
+    days_after_event: 7
 ```
 
-**Note:** The strategy works without API keys using mock social data for testing.
+3. **Install tweepy**:
+```bash
+pip install tweepy
+```
+
+**📖 Detailed Guide**: See [TWITTER_SETUP.md](TWITTER_SETUP.md) for complete setup instructions, API costs, and troubleshooting.
 
 ## Understanding the Strategy
 
 ### Signal Generation Pipeline
 
 ```
-1. SEC Filing → 2. Event Detection → 3. Sentiment Analysis → 4. Signal Generation
-   (8-K, 10-K)     (NLP keywords)       (FinBERT)            (Composite Score)
+1. SEC Filing → 2. Event Detection → 3. Twitter Data → 4. Sentiment Analysis → 5. Signal Generation
+   (8-K, 10-K)     (NLP keywords)       (API v2)          (FinBERT)             (Composite Score)
+
+   SEC EDGAR ────> ESG Event ────> Twitter/X ────> Market Sentiment ────> Trading Signal
+                   Detected           Fetch           Analysis               Generation
 ```
 
 ### ESG Event Shock Score Formula

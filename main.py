@@ -10,7 +10,7 @@ from pathlib import Path
 
 # Import project modules
 from src.utils.logging_config import setup_logging
-from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors
+from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher
 from src.preprocessing import SECFilingParser, TextCleaner
 from src.nlp import ESGEventDetector, FinancialSentimentAnalyzer, ReactionFeatureExtractor
 from src.signals import ESGSignalGenerator, PortfolioConstructor
@@ -105,7 +105,7 @@ def main():
         )
         logger.info(f"Loaded {len(factors)} periods of factor data")
 
-    # Phase 2: Event Detection & Sentiment Analysis
+    # Phase 2: Event Detection & Sentiment Analysis with Twitter Data
     if args.mode in ['full']:
         logger.info("\n>>> PHASE 2: EVENT DETECTION & SENTIMENT ANALYSIS")
 
@@ -115,6 +115,14 @@ def main():
         event_detector = ESGEventDetector()
         sentiment_analyzer = FinancialSentimentAnalyzer()
         feature_extractor = ReactionFeatureExtractor(sentiment_analyzer)
+
+        # Initialize Twitter fetcher
+        twitter_config = config['data']['twitter']
+        twitter_fetcher = TwitterFetcher(
+            bearer_token=twitter_config.get('bearer_token') if twitter_config.get('bearer_token') else None,
+            use_mock=twitter_config.get('use_mock', True)
+        )
+        logger.info(f"Twitter fetcher initialized (mock mode: {twitter_fetcher.use_mock})")
 
         # Process filings
         events_data = []
@@ -138,21 +146,30 @@ def main():
                 logger.info(f"  Event detected: {event_result['category']} "
                           f"(confidence: {event_result['confidence']:.2f})")
 
-                # Create mock social media data for testing
+                # Fetch Twitter data for this event
                 event_date = datetime.strptime(filing.get('date', args.start_date), '%Y-%m-%d')
-                mock_tweets = feature_extractor.create_mock_social_data(
+                logger.info(f"  Fetching Twitter data for {filing['ticker']} around {event_date.date()}...")
+
+                tweets_df = twitter_fetcher.fetch_tweets_for_event(
                     ticker=filing['ticker'],
                     event_date=event_date,
-                    n_tweets=100,
-                    sentiment_bias='negative'
+                    keywords=twitter_config.get('esg_keywords', []),
+                    days_before=twitter_config.get('days_before_event', 3),
+                    days_after=twitter_config.get('days_after_event', 7),
+                    max_results=twitter_config.get('max_tweets_per_ticker', 100)
                 )
 
-                # Extract reaction features
+                if tweets_df.empty:
+                    logger.warning(f"  No tweets found for {filing['ticker']}, skipping event.")
+                    continue
+
+                # Extract reaction features from Twitter data
                 reaction_features = feature_extractor.extract_features(
-                    mock_tweets,
+                    tweets_df,
                     event_date
                 )
 
+                logger.info(f"  Tweets analyzed: {reaction_features['n_tweets']}")
                 logger.info(f"  Reaction intensity: {reaction_features['intensity']:.3f}, "
                           f"Volume ratio: {reaction_features['volume_ratio']:.2f}")
 
@@ -163,7 +180,7 @@ def main():
                     'reaction_features': reaction_features
                 })
 
-        logger.info(f"Detected {len(events_data)} ESG events with reactions")
+        logger.info(f"Detected {len(events_data)} ESG events with Twitter reactions")
 
     # Phase 3: Signal Generation
     if args.mode in ['full']:
@@ -281,11 +298,15 @@ def run_demo(args, config, logger):
 
     prices = pd.DataFrame(mock_prices_list).set_index(['Date', 'ticker'])
 
-    # Create mock events and signals
+    # Create mock events and signals using Twitter data
     event_detector = ESGEventDetector()
     sentiment_analyzer = FinancialSentimentAnalyzer()
     feature_extractor = ReactionFeatureExtractor(sentiment_analyzer)
     signal_generator = ESGSignalGenerator()
+
+    # Initialize Twitter fetcher in mock mode for demo
+    twitter_fetcher = TwitterFetcher(use_mock=True)
+    logger.info("Demo mode: Using mock Twitter data")
 
     signals_list = []
 
@@ -301,13 +322,17 @@ def run_demo(args, config, logger):
             'sentiment': 'negative'
         }
 
-        # Mock reaction with varying sentiment intensities
-        sentiment_biases = ['very_negative', 'negative', 'neutral', 'slightly_positive', 'positive']
-        mock_tweets = feature_extractor.create_mock_social_data(
-            ticker, event_date, n_tweets=100, sentiment_bias=sentiment_biases[i] if i < 2 else 'negative'
+        # Fetch mock Twitter data
+        logger.info(f"Generating mock Twitter data for {ticker}...")
+        tweets_df = twitter_fetcher.fetch_tweets_for_event(
+            ticker=ticker,
+            event_date=event_date,
+            days_before=3,
+            days_after=7,
+            max_results=100
         )
 
-        reaction_features = feature_extractor.extract_features(mock_tweets, event_date)
+        reaction_features = feature_extractor.extract_features(tweets_df, event_date)
 
         # Artificially vary the features dramatically to create full quintile distribution
         if i < 5:

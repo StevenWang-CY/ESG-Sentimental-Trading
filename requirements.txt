@@ -19,9 +19,8 @@ beautifulsoup4==4.12.2
 lxml==4.9.3
 requests==2.31.0
 
-# Social Media (Optional - requires API keys)
-# tweepy==4.14.0
-# praw==7.7.0
+# Twitter/X Data (Optional - requires API Bearer Token)
+tweepy==4.14.0  # For Twitter API v2 integration
 
 # Statistics
 statsmodels==0.14.0
