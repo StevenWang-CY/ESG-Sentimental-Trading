@@ -236,3 +236,26 @@ class UniverseFetcher:
         tickers = df['ticker'].tolist()
         print(f"Loaded {len(tickers)} tickers from {filename}")
         return tickers
+
+    def get_esg_sensitive_nasdaq100(self, sensitivity: str = 'HIGH') -> List[str]:
+        """
+        Get ESG-sensitive NASDAQ-100 stocks
+
+        Args:
+            sensitivity: 'VERY HIGH', 'HIGH', 'MEDIUM', 'ALL'
+
+        Returns:
+            List of ESG-sensitive ticker symbols
+        """
+        from .esg_universe import ESGSensitiveUniverse
+
+        esg_universe = ESGSensitiveUniverse()
+        tickers = esg_universe.get_esg_sensitive_nasdaq100(sensitivity)
+
+        print(f"\n✓ Fetched {len(tickers)} ESG-sensitive NASDAQ-100 stocks")
+        print(f"  Sensitivity threshold: {sensitivity}")
+
+        # Print breakdown
+        esg_universe.print_universe_summary(tickers)
+
+        return tickers

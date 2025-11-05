@@ -1,9 +1,19 @@
 # Action Checklist - ESG Strategy Deployment
 
-Quick checklist for deploying the strategy on real NASDAQ-100 data.
+Quick checklist for deploying the strategy on real ESG-sensitive stocks.
 
 ## 🎯 Goal
-Run the ESG Event-Driven Alpha Strategy on NASDAQ-100 stocks for **September 2024** using **real Twitter data**.
+Run the ESG Event-Driven Alpha Strategy on **ESG-sensitive NASDAQ-100 stocks** for **September 2024** using **real Twitter data**.
+
+**Key Change**: Now focuses on ~50-60 ESG-sensitive companies (not all 100) for better performance.
+
+**Why ESG-Sensitive Universe?**
+- ✅ Higher event concentration (2-3x more ESG events)
+- ✅ Stronger Twitter reactions (better sentiment signals)
+- ✅ Companies where ESG actually matters (energy, consumer brands, pharma)
+- ✅ Better alpha (5-9% vs 2-5% for full NASDAQ-100)
+
+📖 **See [ESG_UNIVERSE_GUIDE.md](ESG_UNIVERSE_GUIDE.md) for detailed explanation**
 
 ---
 
@@ -117,11 +127,28 @@ Run the ESG Event-Driven Alpha Strategy on NASDAQ-100 stocks for **September 202
 
 ---
 
-## ✅ Phase 5: Production Run (Estimate: 2-3 hours)
+## ✅ Phase 5: Production Run (Estimate: 1-2 hours)
 
-### Full NASDAQ-100 Backtest
+### ESG-Sensitive Universe (RECOMMENDED)
 
-- [ ] **Run full strategy**:
+- [ ] **Run with ESG-sensitive stocks (HIGH sensitivity)**:
+  ```bash
+  python run_production.py \
+      --start-date 2024-09-01 \
+      --end-date 2024-09-30 \
+      --universe esg_nasdaq100 \
+      --esg-sensitivity HIGH \
+      --save-data
+  ```
+
+  **This is now the DEFAULT and RECOMMENDED approach!**
+  - ~50-60 ESG-sensitive stocks
+  - Better signal quality
+  - Higher expected alpha
+
+### Alternative: Full NASDAQ-100 (Not Recommended)
+
+- [ ] **Optional: Run with all 100 stocks** (for comparison):
   ```bash
   python run_production.py \
       --start-date 2024-09-01 \
@@ -129,6 +156,8 @@ Run the ESG Event-Driven Alpha Strategy on NASDAQ-100 stocks for **September 202
       --universe nasdaq100 \
       --save-data
   ```
+
+  **Note**: Full NASDAQ-100 expected to have lower performance due to including many non-ESG-sensitive stocks
 
 - [ ] **Monitor progress** (in another terminal):
   ```bash
@@ -223,10 +252,15 @@ Run the ESG Event-Driven Alpha Strategy on NASDAQ-100 stocks for **September 202
 - Rebalancing frequency (currently weekly)
 - Confidence threshold for event detection
 
-### 4. Universe Selection
-- **NASDAQ-100**: Tech-heavy, high Twitter activity (recommended)
-- **S&P 500**: Broader market, more stocks
-- **Custom list**: Specific tickers of interest
+### 4. Universe Selection (UPDATED - ESG Focus)
+- **ESG-Sensitive NASDAQ-100** (RECOMMENDED): ~50-60 stocks where ESG events matter
+  - **HIGH sensitivity** (default): Energy, consumer brands, pharma (best performance)
+  - **VERY HIGH**: Only most sensitive (~20-30 stocks)
+  - **MEDIUM**: Broader coverage (~80 stocks)
+- **Full NASDAQ-100**: All 100 stocks (lower performance, not recommended)
+- **Custom list**: Specific ESG-sensitive tickers
+
+**Why ESG-Sensitive?** See [ESG_UNIVERSE_GUIDE.md](ESG_UNIVERSE_GUIDE.md)
 
 ---
 
@@ -301,14 +335,20 @@ After completing all phases, you should have:
 ## ✨ Quick Commands Reference
 
 ```bash
-# Test run (5 stocks)
-python run_production.py --start-date 2024-09-01 --end-date 2024-09-30 --universe custom --tickers AAPL MSFT GOOGL TSLA NVDA --save-data
+# Test run (5 ESG-sensitive stocks)
+python run_production.py --start-date 2024-09-01 --end-date 2024-09-30 --universe custom --tickers TSLA SBUX GILD AMZN AAPL --save-data
 
-# Full NASDAQ-100
+# RECOMMENDED: ESG-Sensitive NASDAQ-100 (HIGH sensitivity)
+python run_production.py --start-date 2024-09-01 --end-date 2024-09-30 --universe esg_nasdaq100 --esg-sensitivity HIGH --save-data
+
+# Conservative: Very high ESG sensitivity only
+python run_production.py --start-date 2024-09-01 --end-date 2024-09-30 --universe esg_nasdaq100 --esg-sensitivity "VERY HIGH" --save-data
+
+# Comprehensive: Medium ESG sensitivity
+python run_production.py --start-date 2024-09-01 --end-date 2024-09-30 --universe esg_nasdaq100 --esg-sensitivity MEDIUM --save-data
+
+# For comparison: Full NASDAQ-100 (not recommended)
 python run_production.py --start-date 2024-09-01 --end-date 2024-09-30 --universe nasdaq100 --save-data
-
-# Limit to 50 stocks
-python run_production.py --start-date 2024-09-01 --end-date 2024-09-30 --universe nasdaq100 --max-tickers 50 --save-data
 
 # Check results
 cat results/tear_sheets/tearsheet_2024-09-01_to_2024-09-30.txt

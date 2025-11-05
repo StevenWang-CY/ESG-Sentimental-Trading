@@ -69,9 +69,12 @@ def main():
                        help='Start date (YYYY-MM-DD), e.g., 2024-09-01')
     parser.add_argument('--end-date', type=str, required=True,
                        help='End date (YYYY-MM-DD), e.g., 2024-09-30')
-    parser.add_argument('--universe', type=str, default='nasdaq100',
-                       choices=['nasdaq100', 'sp500', 'custom'],
-                       help='Stock universe to use')
+    parser.add_argument('--universe', type=str, default='esg_nasdaq100',
+                       choices=['nasdaq100', 'esg_nasdaq100', 'sp500', 'custom'],
+                       help='Stock universe to use (esg_nasdaq100 recommended for ESG strategy)')
+    parser.add_argument('--esg-sensitivity', type=str, default='HIGH',
+                       choices=['VERY HIGH', 'HIGH', 'MEDIUM', 'ALL'],
+                       help='ESG sensitivity threshold (for esg_nasdaq100 universe)')
     parser.add_argument('--tickers', type=str, nargs='*',
                        help='Specific tickers (if universe=custom)')
     parser.add_argument('--max-tickers', type=int, default=None,
@@ -128,7 +131,12 @@ def main():
     logger.info("\n>>> STEP 1: FETCHING STOCK UNIVERSE")
     universe_fetcher = UniverseFetcher()
 
-    if args.universe == 'nasdaq100':
+    if args.universe == 'esg_nasdaq100':
+        logger.info(f"Using ESG-SENSITIVE NASDAQ-100 (sensitivity: {args.esg_sensitivity})")
+        logger.info("This universe focuses on companies most affected by ESG events")
+        tickers = universe_fetcher.get_esg_sensitive_nasdaq100(args.esg_sensitivity)
+    elif args.universe == 'nasdaq100':
+        logger.info("Using full NASDAQ-100 (all stocks)")
         tickers = universe_fetcher.get_nasdaq100_tickers()
     elif args.universe == 'sp500':
         tickers = universe_fetcher.get_sp500_tickers()

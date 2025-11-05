@@ -6,6 +6,7 @@ A quantitative trading strategy that exploits market inefficiencies around mater
 
 This project implements a **systematic alpha strategy** based on the hypothesis that markets systematically underreact to material ESG events in the medium term (5-30 trading days). The strategy:
 
+- **Focuses** on ESG-sensitive companies (energy, consumer, healthcare, materials) where ESG events have material impact
 - **Detects** ESG events from SEC filings using NLP
 - **Analyzes** market reaction via sentiment analysis of **Twitter/X data**
 - **Generates** trading signals from composite ESG Event Shock Scores
@@ -17,10 +18,11 @@ This project implements a **systematic alpha strategy** based on the hypothesis 
 - **yfinance**: For price data and returns
 - **Fama-French Data Library**: For factor regression analysis
 
-**Target Performance:**
+**Target Performance (ESG-Sensitive Universe):**
 - Sharpe Ratio: 1.2 - 1.8
-- Annualized Alpha: 4-8% (t-stat > 2.0)
+- Annualized Alpha: 5-9% (t-stat > 2.0)
 - Max Drawdown: < 20%
+- Event Frequency: 2-3x higher than full NASDAQ-100
 
 ## Project Structure
 
@@ -123,20 +125,28 @@ This will:
 4. Run backtest
 5. Display performance metrics
 
-### Production Mode (Real Data on NASDAQ-100)
+### Production Mode (Real Data - ESG-Sensitive Stocks)
 
-For running on real NASDAQ-100 stocks with real Twitter data:
+**RECOMMENDED:** Focus on ESG-sensitive companies that are more likely to be affected by ESG events:
 
 ```bash
-# Test with 5 stocks first
+# ESG-Sensitive NASDAQ-100 (RECOMMENDED - ~50-60 stocks)
+python run_production.py \
+    --start-date 2024-09-01 \
+    --end-date 2024-09-30 \
+    --universe esg_nasdaq100 \
+    --esg-sensitivity HIGH \
+    --save-data
+
+# Test with ESG-sensitive stocks first (5 high-impact companies)
 python run_production.py \
     --start-date 2024-09-01 \
     --end-date 2024-09-30 \
     --universe custom \
-    --tickers AAPL MSFT GOOGL TSLA NVDA \
+    --tickers TSLA SBUX GILD AMZN XEL \
     --save-data
 
-# Full NASDAQ-100 run
+# Full NASDAQ-100 (if you want all 100 stocks)
 python run_production.py \
     --start-date 2024-09-01 \
     --end-date 2024-09-30 \
@@ -144,9 +154,13 @@ python run_production.py \
     --save-data
 ```
 
+**Why ESG-sensitive universe?** Companies in energy, consumer, healthcare, and materials sectors are 2-3x more likely to experience material ESG events with higher Twitter engagement. See [ESG_UNIVERSE_GUIDE.md](CHECKLIST/ESG_UNIVERSE_GUIDE.md) for details.
+
 **📖 Complete deployment guide**: See [PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md)
 
-**✅ Quick checklist**: See [ACTION_CHECKLIST.md](ACTION_CHECKLIST.md)
+**✅ Quick checklist**: See [CHECKLIST/ACTION_CHECKLIST.md](CHECKLIST/ACTION_CHECKLIST.md)
+
+**🎯 ESG-sensitive universe guide**: See [ESG_UNIVERSE_GUIDE.md](CHECKLIST/ESG_UNIVERSE_GUIDE.md)
 
 ### Full Pipeline
 
