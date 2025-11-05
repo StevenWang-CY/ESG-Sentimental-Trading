@@ -24,6 +24,25 @@ This project implements a **systematic alpha strategy** based on the hypothesis 
 - Max Drawdown: < 20%
 - Event Frequency: 2-3x higher than full NASDAQ-100
 
+## Recent Improvements (November 2024)
+
+**Enhanced with research-backed ML techniques** from academic literature (Savarese 2019, Politecnico di Torino):
+
+### Key Enhancements
+1. **Word-Level Correlation Analysis**: Analyzes individual word correlations with stock price movements (most impactful innovation from thesis)
+2. **Temporal Window Features**: 7-day sentiment aggregation with 11 temporal indicators (optimal window from research)
+3. **ESG-Specific Sentiment Dictionaries**: 285+ domain-specific terms beyond Loughran-McDonald financial dictionary
+4. **Categorical Classification**: BUY/SELL/HOLD signals (+1%/-1% thresholds) outperform continuous predictions
+5. **Random Forest Classifier**: Best performer in thesis (69.96% profit improvement)
+6. **Feature Selection**: Prevents curse of dimensionality (15 features vs. 30+)
+
+### Expected Performance Improvement
+- **+30% profit improvement** from sentiment analysis (thesis finding)
+- **60-70% classification accuracy** (vs. ~50% baseline)
+- **Higher Sharpe Ratio** from better signal quality
+
+See [THESIS_IMPROVEMENTS.md](THESIS_IMPROVEMENTS.md) for complete documentation of research-backed enhancements.
+
 ## Project Structure
 
 ```
@@ -39,6 +58,8 @@ ESG-Sentimental-Trading/
 │   ├── data/                    # Data acquisition modules
 │   │   ├── sec_downloader.py
 │   │   ├── price_fetcher.py
+│   │   ├── twitter_fetcher.py
+│   │   ├── esg_universe.py      # ESG-sensitive stock universe
 │   │   └── ff_factors.py
 │   ├── preprocessing/           # Text preprocessing
 │   │   ├── sec_parser.py
@@ -46,7 +67,14 @@ ESG-Sentimental-Trading/
 │   ├── nlp/                     # NLP models
 │   │   ├── event_detector.py
 │   │   ├── sentiment_analyzer.py
-│   │   └── feature_extractor.py
+│   │   ├── feature_extractor.py
+│   │   ├── word_correlation_analyzer.py     # NEW: Word-level correlations
+│   │   ├── temporal_feature_extractor.py    # NEW: 7-day temporal features
+│   │   └── esg_sentiment_dictionaries.py    # NEW: ESG-specific dictionaries
+│   ├── ml/                      # Machine Learning (NEW)
+│   │   ├── categorical_classifier.py        # NEW: BUY/SELL/HOLD classification
+│   │   ├── feature_selector.py              # NEW: Feature selection
+│   │   └── enhanced_pipeline.py             # NEW: Complete ML pipeline
 │   ├── signals/                 # Signal generation
 │   │   ├── signal_generator.py
 │   │   └── portfolio_constructor.py
@@ -55,10 +83,14 @@ ESG-Sentimental-Trading/
 │   │   ├── metrics.py
 │   │   └── factor_analysis.py
 │   └── utils/                   # Utilities
+├── examples/
+│   └── enhanced_pipeline_example.py         # NEW: Usage example
 ├── notebooks/                   # Jupyter notebooks
 ├── results/                     # Output results
+├── models/                      # Saved trained models (NEW)
 ├── main.py                      # Main execution script
 ├── requirements.txt             # Python dependencies
+├── THESIS_IMPROVEMENTS.md       # NEW: Research-backed enhancements
 └── README.md                    # This file
 ```
 
@@ -475,8 +507,7 @@ MIT License - See [LICENSE](LICENSE) file for details.
 ## Contact
 
 For questions or feedback:
-- GitHub Issues: [Create an issue](https://github.com/yourusername/esg-event-alpha/issues)
-- Email: research@example.com
+- Email: StevenWANG0805@outlook.com
 
 ---
 
