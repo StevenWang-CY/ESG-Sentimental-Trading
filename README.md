@@ -41,7 +41,25 @@ This project implements a **systematic alpha strategy** based on the hypothesis 
 - **60-70% classification accuracy** (vs. ~50% baseline)
 - **Higher Sharpe Ratio** from better signal quality
 
-See [THESIS_IMPROVEMENTS.md](THESIS_IMPROVEMENTS.md) for complete documentation of research-backed enhancements.
+## 📚 Documentation
+
+- **[GETTING_STARTED.md](GETTING_STARTED.md)** - Complete setup and usage guide ← **START HERE**
+- **[THESIS_IMPROVEMENTS.md](THESIS_IMPROVEMENTS.md)** - Technical details of ML improvements
+- **[ACTION_ITEMS.md](ACTION_ITEMS.md)** - Deployment checklist and quick actions
+- **[DOCUMENTATION.md](DOCUMENTATION.md)** - Full documentation index
+
+## 🚀 Quick Start
+
+```bash
+# 1. Setup (5 minutes)
+./setup.sh
+source venv/bin/activate
+
+# 2. Test with synthetic data (no API keys needed)
+python examples/enhanced_pipeline_example.py
+```
+
+**Ready for real data?** See [GETTING_STARTED.md](GETTING_STARTED.md) for complete instructions.
 
 ## Project Structure
 
