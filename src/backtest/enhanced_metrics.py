@@ -43,7 +43,7 @@ class EnhancedPerformanceAnalyzer:
         if self.returns.empty:
             return self._get_empty_metrics()
 
-        return {
+        metrics = {
             'returns': self._calculate_return_metrics(),
             'risk': self._calculate_risk_metrics(),
             'trading': self._calculate_enhanced_trading_metrics(),
@@ -53,6 +53,16 @@ class EnhancedPerformanceAnalyzer:
             'monthly_breakdown': self._calculate_monthly_breakdown(),
             'validation': self._run_validation_checks()
         }
+
+        # Run sanity checks and log warnings
+        sanity_warnings = self._validate_metric_sanity(metrics)
+        if sanity_warnings:
+            metrics['validation']['sanity_warnings'] = sanity_warnings
+            import warnings
+            for warning_msg in sanity_warnings:
+                warnings.warn(f"Metric sanity check: {warning_msg}")
+
+        return metrics
 
     # ==================== RETURN METRICS ====================
 
@@ -97,6 +107,9 @@ class EnhancedPerformanceAnalyzer:
         """
         Calculate Sharpe Ratio
         Formula: Sharpe = sqrt(252) * E[R - Rf] / std(R - Rf)
+
+        NOTE: Returns a ratio (not percentage). Typical range: -3 to +5
+        Values > 4 may indicate look-ahead bias or data errors.
         """
         if self.returns.empty:
             return 0.0
@@ -107,12 +120,20 @@ class EnhancedPerformanceAnalyzer:
             return 0.0
 
         sharpe = np.sqrt(252) * excess_returns.mean() / excess_returns.std()
+
+        # Validation: Warn if Sharpe seems unrealistic
+        if abs(sharpe) > 10:
+            import warnings
+            warnings.warn(f"Sharpe ratio {sharpe:.2f} is extremely high/low. Check for data errors or look-ahead bias.")
+
         return sharpe
 
     def _calculate_sortino_ratio(self, risk_free_rate: float = 0.02) -> float:
         """
         Calculate Sortino Ratio
         Formula: Sortino = sqrt(252) * E[R - Rf] / downside_std(R - Rf)
+
+        NOTE: Returns a ratio (not percentage). Typically 1-3 for good strategies.
         """
         if self.returns.empty:
             return 0.0
@@ -124,17 +145,35 @@ class EnhancedPerformanceAnalyzer:
             return 0.0
 
         sortino = np.sqrt(252) * excess_returns.mean() / downside_std
+
+        # Validation: Warn if Sortino seems unrealistic
+        if abs(sortino) > 10:
+            import warnings
+            warnings.warn(f"Sortino ratio {sortino:.2f} is extremely high/low. Check for data errors.")
+
         return sortino
 
     def _calculate_calmar_ratio(self) -> float:
-        """Calculate Calmar Ratio (CAGR / Max Drawdown)"""
+        """
+        Calculate Calmar Ratio (CAGR / Max Drawdown)
+
+        NOTE: Returns a ratio (not percentage). Typical range: -5 to +10
+        Values > 10 may indicate unrealistic performance.
+        """
         max_dd = abs(self._calculate_max_drawdown())
 
         if max_dd == 0:
             return 0.0
 
         cagr = self._calculate_cagr()
-        return cagr / max_dd
+        calmar = cagr / max_dd
+
+        # Validation: Warn if Calmar seems unrealistic
+        if abs(calmar) > 20:
+            import warnings
+            warnings.warn(f"Calmar ratio {calmar:.2f} is extremely high/low. Check for data errors.")
+
+        return calmar
 
     # ==================== RISK METRICS ====================
 
@@ -277,28 +316,77 @@ class EnhancedPerformanceAnalyzer:
         Calculate return for each closed trade
 
         Returns:
-            List of trade returns
+            List of trade returns (P&L as percentage of entry value)
         """
-        if self.trades.empty or self.positions.empty:
+        if self.trades.empty:
             return []
 
-        # This is a simplified version - in production, track entry/exit explicitly
-        # For now, approximate from position data
         trade_returns = []
 
-        # Group trades by ticker
+        # Group trades by ticker to track position entries and exits
         for ticker in self.trades['ticker'].unique():
             ticker_trades = self.trades[self.trades['ticker'] == ticker].sort_values('date')
 
-            # For simplicity, calculate return based on value changes
-            for i in range(0, len(ticker_trades)-1, 2):  # Pairs of open/close
-                if i+1 < len(ticker_trades):
-                    entry_value = ticker_trades.iloc[i]['value']
-                    exit_value = ticker_trades.iloc[i+1]['value']
+            position = 0  # Current position size
+            entry_price = 0
+            entry_value = 0
 
-                    if entry_value != 0:
-                        trade_return = (exit_value - entry_value) / abs(entry_value)
+            for _, trade in ticker_trades.iterrows():
+                shares = trade['shares']
+                price = trade['price']
+
+                # Opening a new position (from 0)
+                if position == 0 and shares != 0:
+                    position = shares
+                    entry_price = price
+                    entry_value = abs(shares * price)
+
+                # Adding to existing position (same direction)
+                elif (position > 0 and shares > 0) or (position < 0 and shares < 0):
+                    # Average in
+                    total_shares = position + shares
+                    entry_price = ((position * entry_price) + (shares * price)) / total_shares
+                    position = total_shares
+                    entry_value = abs(position * entry_price)
+
+                # Closing entire position
+                elif (position > 0 and shares < 0 and abs(shares) >= position) or \
+                     (position < 0 and shares > 0 and abs(shares) >= abs(position)):
+
+                    # Calculate P&L
+                    if position > 0:  # Long position
+                        pnl = position * (price - entry_price)
+                    else:  # Short position
+                        pnl = abs(position) * (entry_price - price)
+
+                    # Return as percentage of entry value
+                    if entry_value > 0:
+                        trade_return = pnl / entry_value
                         trade_returns.append(trade_return)
+
+                    # Reset position
+                    position = 0
+                    entry_price = 0
+                    entry_value = 0
+
+                # Partial close
+                elif (position > 0 and shares < 0) or (position < 0 and shares > 0):
+                    # Calculate P&L for closed portion
+                    closed_shares = abs(shares)
+
+                    if position > 0:  # Long position
+                        pnl = closed_shares * (price - entry_price)
+                    else:  # Short position
+                        pnl = closed_shares * (entry_price - price)
+
+                    # Return as percentage of closed portion's entry value
+                    closed_value = closed_shares * entry_price
+                    if closed_value > 0:
+                        trade_return = pnl / closed_value
+                        trade_returns.append(trade_return)
+
+                    # Update remaining position
+                    position = position + shares  # shares is negative for close
 
         return trade_returns
 
@@ -521,6 +609,47 @@ class EnhancedPerformanceAnalyzer:
 
     # ==================== VALIDATION CHECKS ====================
 
+    def _validate_metric_sanity(self, metrics: Dict) -> List[str]:
+        """
+        Check if calculated metrics pass sanity tests
+
+        Returns:
+            List of warning messages (empty if all checks pass)
+        """
+        warnings = []
+
+        # Check Sharpe ratio
+        sharpe = metrics['returns'].get('sharpe_ratio', 0)
+        if abs(sharpe) > 10:
+            warnings.append(f"Sharpe ratio {sharpe:.2f} is unrealistic (typical: -3 to +5)")
+
+        # Check Sortino ratio
+        sortino = metrics['returns'].get('sortino_ratio', 0)
+        if abs(sortino) > 10:
+            warnings.append(f"Sortino ratio {sortino:.2f} is unrealistic (typical: -3 to +5)")
+
+        # Check Calmar ratio
+        calmar = metrics['returns'].get('calmar_ratio', 0)
+        if abs(calmar) > 20:
+            warnings.append(f"Calmar ratio {calmar:.2f} is unrealistic (typical: -5 to +10)")
+
+        # Check win rate
+        win_rate = metrics['trading'].get('win_rate', 0)
+        if win_rate > 0.90:
+            warnings.append(f"Win rate {win_rate:.1%} is suspiciously high (typical: 40-70%)")
+
+        # Check profit factor
+        profit_factor = metrics['trading'].get('profit_factor', 0)
+        if profit_factor > 10 and profit_factor != float('inf'):
+            warnings.append(f"Profit factor {profit_factor:.2f} is suspiciously high (typical: 1.2-3.0)")
+
+        # Check volatility
+        vol = metrics['risk'].get('volatility', 0)
+        if vol < 0.01:
+            warnings.append(f"Volatility {vol:.2%} is unrealistically low (typical: 10-50%)")
+
+        return warnings
+
     def _run_validation_checks(self) -> Dict:
         """
         Run validation checks for common quant errors (red flags)
@@ -720,7 +849,11 @@ class EnhancedPerformanceAnalyzer:
         print("-"*80)
         for key, value in metrics['returns'].items():
             if isinstance(value, float):
-                print(f"{key:30s}: {value:10.2%}")
+                # Ratios should NOT be formatted as percentages
+                if key in ['sharpe_ratio', 'sortino_ratio', 'calmar_ratio']:
+                    print(f"{key:30s}: {value:10.2f}")
+                else:
+                    print(f"{key:30s}: {value:10.2%}")
 
         # Risk
         print("\nRISK METRICS:")
@@ -729,6 +862,9 @@ class EnhancedPerformanceAnalyzer:
             if isinstance(value, (int, float)):
                 if isinstance(value, int):
                     print(f"{key:30s}: {value:10d}")
+                # Skewness and Kurtosis should NOT be formatted as percentages
+                elif key in ['skewness', 'kurtosis']:
+                    print(f"{key:30s}: {value:10.2f}")
                 else:
                     print(f"{key:30s}: {value:10.2%}")
 

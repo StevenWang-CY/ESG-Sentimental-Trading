@@ -284,7 +284,11 @@ class PerformanceAnalyzer:
         print("-"*60)
         for key, value in metrics['returns'].items():
             if isinstance(value, float):
-                print(f"{key:30s}: {value:10.2%}")
+                # Ratios should NOT be formatted as percentages
+                if key in ['sharpe_ratio', 'sortino_ratio', 'calmar_ratio']:
+                    print(f"{key:30s}: {value:10.2f}")
+                else:
+                    print(f"{key:30s}: {value:10.2%}")
 
         print("\nRISK METRICS:")
         print("-"*60)
