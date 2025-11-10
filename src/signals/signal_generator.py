@@ -51,10 +51,11 @@ class ESGSignalGenerator:
         # 1. Event Severity (from event detection confidence)
         event_severity = event_features.get('confidence', 0.5)
 
-        # 2. Intensity (sentiment score, flipped for negative events)
-        # Negative ESG events with negative sentiment -> positive signal (short opportunity)
+        # 2. Intensity (sentiment magnitude - use absolute value for signal strength)
+        # Strong negative sentiment indicates strong market reaction (regardless of direction)
+        # The ESG event category (positive/negative) determines the trade direction
         intensity_raw = reaction_features.get('intensity', 0.0)
-        intensity_normalized = -intensity_raw  # Flip sign
+        intensity_normalized = abs(intensity_raw)  # Use absolute value for strength
 
         # 3. Volume (log-normalized volume ratio)
         volume_ratio = reaction_features.get('volume_ratio', 1.0)
@@ -67,7 +68,7 @@ class ESGSignalGenerator:
         # Compute weighted sum
         raw_score = (
             self.weights['event_severity'] * event_severity +
-            self.weights['intensity'] * abs(intensity_normalized) +
+            self.weights['intensity'] * intensity_normalized +
             self.weights['volume'] * volume_normalized +
             self.weights['duration'] * duration_normalized
         )

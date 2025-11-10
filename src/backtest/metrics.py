@@ -118,21 +118,35 @@ class PerformanceAnalyzer:
         return cagr
 
     def _calculate_sharpe_ratio(self, risk_free_rate: float = 0.02) -> float:
-        """Calculate Sharpe Ratio"""
-        if self.returns.empty or self.returns.std() == 0:
-            return 0.0
+        """
+        Calculate Sharpe Ratio
 
-        excess_returns = self.returns - (risk_free_rate / 252)
-        sharpe = np.sqrt(252) * excess_returns.mean() / self.returns.std()
-        return sharpe
-
-    def _calculate_sortino_ratio(self, risk_free_rate: float = 0.02) -> float:
-        """Calculate Sortino Ratio"""
+        Formula: Sharpe = sqrt(252) * E[R - Rf] / std(R - Rf)
+        where R is portfolio return and Rf is risk-free rate
+        """
         if self.returns.empty:
             return 0.0
 
         excess_returns = self.returns - (risk_free_rate / 252)
-        downside_std = self._calculate_downside_deviation()
+
+        if excess_returns.std() == 0:
+            return 0.0
+
+        sharpe = np.sqrt(252) * excess_returns.mean() / excess_returns.std()
+        return sharpe
+
+    def _calculate_sortino_ratio(self, risk_free_rate: float = 0.02) -> float:
+        """
+        Calculate Sortino Ratio
+
+        Formula: Sortino = sqrt(252) * E[R - Rf] / downside_std(R - Rf)
+        Uses downside deviation of excess returns (only negative excess returns)
+        """
+        if self.returns.empty:
+            return 0.0
+
+        excess_returns = self.returns - (risk_free_rate / 252)
+        downside_std = self._calculate_downside_deviation(returns=excess_returns, threshold=0)
 
         if downside_std == 0:
             return 0.0
@@ -170,12 +184,24 @@ class PerformanceAnalyzer:
         drawdown = (cumulative - running_max) / running_max
         return drawdown[drawdown < 0].mean()
 
-    def _calculate_downside_deviation(self, threshold: float = 0) -> float:
-        """Calculate downside deviation"""
-        if self.returns.empty:
+    def _calculate_downside_deviation(self, returns: pd.Series = None, threshold: float = 0) -> float:
+        """
+        Calculate downside deviation
+
+        Args:
+            returns: Returns series to use (default: self.returns)
+            threshold: Threshold below which returns are considered "downside" (default: 0)
+
+        Returns:
+            Annualized downside deviation
+        """
+        if returns is None:
+            returns = self.returns
+
+        if returns.empty:
             return 0.0
 
-        downside_returns = self.returns[self.returns < threshold]
+        downside_returns = returns[returns < threshold]
 
         if len(downside_returns) == 0:
             return 0.0
