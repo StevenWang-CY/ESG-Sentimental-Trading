@@ -326,10 +326,11 @@ class BacktestEngine:
                         return float(result.iloc[0])
                     return float(result)
                 else:
-                    # Try to find nearest date
-                    future_dates = price_data.index[price_data.index >= date]
-                    if len(future_dates) > 0:
-                        nearest_date = future_dates.min()
+                    # FIXED: Use most recent PAST price (forward-fill) to prevent look-ahead bias
+                    # Never use future prices for trading decisions
+                    past_dates = price_data.index[price_data.index <= date]
+                    if len(past_dates) > 0:
+                        nearest_date = past_dates.max()  # Most recent past date
                         result = price_data.loc[nearest_date, price_type]
                         if isinstance(result, pd.Series):
                             return float(result.iloc[0])
