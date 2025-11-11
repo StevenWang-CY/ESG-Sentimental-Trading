@@ -98,15 +98,16 @@ class ESGSignalGenerator:
             'raw_score': raw_score
         })
 
-        # Compute cross-sectional z-score
-        same_date_scores = [
-            h['raw_score'] for h in self.history
-            if h['date'] == date
-        ]
+        # CRITICAL FIX: For sparse ESG events, use ALL historical scores for ranking
+        # (not just same-date scores). ESG events are infrequent, often 1 per date.
+        # Using same-date normalization causes all signals to be neutral (z=0, Q=3).
+        # Changed from: same_date_scores = [h for h in history if h['date'] == date]
+        all_historical_scores = [h['raw_score'] for h in self.history]
 
-        if len(same_date_scores) > 1:
-            mean_score = np.mean(same_date_scores)
-            std_score = np.std(same_date_scores)
+        # Compute cross-sectional z-score using ALL historical scores
+        if len(all_historical_scores) > 1:
+            mean_score = np.mean(all_historical_scores)
+            std_score = np.std(all_historical_scores)
             z_score = (raw_score - mean_score) / (std_score + 1e-6)
         else:
             z_score = 0.0
@@ -114,8 +115,8 @@ class ESGSignalGenerator:
         # Convert to trading signal using tanh
         signal = np.tanh(z_score)  # Maps to [-1, 1]
 
-        # Compute quintile rank
-        quintile = self._compute_quintile(raw_score, same_date_scores)
+        # Compute quintile rank using ALL historical scores
+        quintile = self._compute_quintile(raw_score, all_historical_scores)
 
         return {
             'ticker': ticker,

@@ -218,7 +218,8 @@ class BacktestEngine:
             # Get current price
             price = self._get_price(date, ticker)
 
-            if price is None or price <= 0:
+            # CRITICAL FIX: Also check for NaN prices (can cause ValueError when converting to int)
+            if price is None or pd.isna(price) or price <= 0:
                 continue
 
             # Calculate target dollar amount based on portfolio value

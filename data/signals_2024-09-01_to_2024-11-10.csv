@@ -1,0 +1,2 @@
+ticker,date,raw_score,z_score,signal,quintile,event_category,event_confidence,sentiment_intensity,volume_ratio
+AAPL,2024-09-01,0.09,0.0,0.0,3,G,0.3,0.0,0.0

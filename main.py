@@ -10,7 +10,7 @@ from pathlib import Path
 
 # Import project modules
 from src.utils.logging_config import setup_logging
-from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher
+from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher, RedditFetcher
 from src.preprocessing import SECFilingParser, TextCleaner
 from src.nlp import ESGEventDetector, FinancialSentimentAnalyzer, ReactionFeatureExtractor
 from src.signals import ESGSignalGenerator, PortfolioConstructor
@@ -116,13 +116,26 @@ def main():
         sentiment_analyzer = FinancialSentimentAnalyzer()
         feature_extractor = ReactionFeatureExtractor(sentiment_analyzer)
 
-        # Initialize Twitter fetcher
-        twitter_config = config['data']['twitter']
-        twitter_fetcher = TwitterFetcher(
-            bearer_token=twitter_config.get('bearer_token') if twitter_config.get('bearer_token') else None,
-            use_mock=twitter_config.get('use_mock', True)
-        )
-        logger.info(f"Twitter fetcher initialized (mock mode: {twitter_fetcher.use_mock})")
+        # Initialize social media fetcher (Reddit or Twitter)
+        social_media_config = config['data']['social_media']
+        source = social_media_config.get('source', 'reddit').lower()
+
+        if source == 'reddit':
+            reddit_config = config['data']['reddit']
+            social_media_fetcher = RedditFetcher(
+                client_id=reddit_config.get('client_id'),
+                client_secret=reddit_config.get('client_secret'),
+                user_agent=reddit_config.get('user_agent', 'ESG Sentiment Trading Bot 1.0'),
+                use_mock=reddit_config.get('use_mock', True)
+            )
+            logger.info(f"Reddit fetcher initialized (mock mode: {social_media_fetcher.use_mock})")
+        else:  # twitter
+            twitter_config = config['data']['twitter']
+            social_media_fetcher = TwitterFetcher(
+                bearer_token=twitter_config.get('bearer_token'),
+                use_mock=twitter_config.get('use_mock', True)
+            )
+            logger.info(f"Twitter fetcher initialized (mock mode: {social_media_fetcher.use_mock})")
 
         # Process filings
         events_data = []
@@ -146,30 +159,31 @@ def main():
                 logger.info(f"  Event detected: {event_result['category']} "
                           f"(confidence: {event_result['confidence']:.2f})")
 
-                # Fetch Twitter data for this event
+                # Fetch social media data for this event
                 event_date = datetime.strptime(filing.get('date', args.start_date), '%Y-%m-%d')
-                logger.info(f"  Fetching Twitter data for {filing['ticker']} around {event_date.date()}...")
+                source_name = "Reddit" if source == 'reddit' else "Twitter"
+                logger.info(f"  Fetching {source_name} data for {filing['ticker']} around {event_date.date()}...")
 
-                tweets_df = twitter_fetcher.fetch_tweets_for_event(
+                posts_df = social_media_fetcher.fetch_tweets_for_event(
                     ticker=filing['ticker'],
                     event_date=event_date,
-                    keywords=twitter_config.get('esg_keywords', []),
-                    days_before=twitter_config.get('days_before_event', 3),
-                    days_after=twitter_config.get('days_after_event', 7),
-                    max_results=twitter_config.get('max_tweets_per_ticker', 100)
+                    keywords=social_media_config.get('esg_keywords', []),
+                    days_before=social_media_config.get('days_before_event', 3),
+                    days_after=social_media_config.get('days_after_event', 7),
+                    max_results=social_media_config.get('max_posts_per_ticker', 100)
                 )
 
-                if tweets_df.empty:
-                    logger.warning(f"  No tweets found for {filing['ticker']}, skipping event.")
+                if posts_df.empty:
+                    logger.warning(f"  No {source_name} posts found for {filing['ticker']}, skipping event.")
                     continue
 
-                # Extract reaction features from Twitter data
+                # Extract reaction features from social media data
                 reaction_features = feature_extractor.extract_features(
-                    tweets_df,
+                    posts_df,
                     event_date
                 )
 
-                logger.info(f"  Tweets analyzed: {reaction_features['n_tweets']}")
+                logger.info(f"  Posts analyzed: {reaction_features['n_tweets']} from {source_name}")
                 logger.info(f"  Reaction intensity: {reaction_features['intensity']:.3f}, "
                           f"Volume ratio: {reaction_features['volume_ratio']:.2f}")
 
@@ -180,7 +194,7 @@ def main():
                     'reaction_features': reaction_features
                 })
 
-        logger.info(f"Detected {len(events_data)} ESG events with Twitter reactions")
+        logger.info(f"Detected {len(events_data)} ESG events with {source_name} reactions")
 
     # Phase 3: Signal Generation
     if args.mode in ['full']:
@@ -310,15 +324,27 @@ def run_demo(args, config, logger):
 
         returns = []
         for i, date in enumerate(dates):
-            # Base random return
+            # Base market return with realistic volatility (1.5% daily std = ~24% annualized)
             base_return = np.random.normal(0, 0.015)
 
-            # Add signal-driven return after event
+            # Add occasional market shocks to create fat tails and realistic drawdowns
+            if np.random.random() < 0.08:  # 8% chance of shock (more frequent)
+                shock = np.random.normal(0, 0.035)  # Larger shocks
+                base_return += shock
+
+            # Add signal-driven return after event (with high imperfection)
             if date >= event_date:
                 days_since_event = (date - event_date).days
                 # Alpha decays over 30 days
                 if days_since_event <= 30:
-                    signal_effect = (signal_score - 0.5) * 0.002 * (1 - days_since_event / 30)
+                    # Signal effectiveness varies WIDELY: -50% to 200% of expected
+                    # Negative values mean signal predicted wrong direction (happens in real life!)
+                    # This creates realistic scenarios where signals often fail
+                    signal_noise = np.random.uniform(-0.5, 2.0)
+
+                    # Very weak signal strength (was 0.0008, now 0.0004)
+                    # Real alpha is tiny - most edge comes from doing this consistently
+                    signal_effect = (signal_score - 0.5) * 0.0004 * (1 - days_since_event / 30) * signal_noise
                     base_return += signal_effect
 
             returns.append(base_return)
@@ -342,9 +368,9 @@ def run_demo(args, config, logger):
     feature_extractor = ReactionFeatureExtractor(sentiment_analyzer)
     signal_generator = ESGSignalGenerator()
 
-    # Initialize Twitter fetcher in mock mode for demo
-    twitter_fetcher = TwitterFetcher(use_mock=True)
-    logger.info("Demo mode: Using mock Twitter data")
+    # Initialize Reddit fetcher in mock mode for demo
+    reddit_fetcher = RedditFetcher(use_mock=True)
+    logger.info("Demo mode: Using mock Reddit data")
 
     signals_list = []
 
@@ -364,9 +390,9 @@ def run_demo(args, config, logger):
             'sentiment': 'negative'
         }
 
-        # Fetch mock Twitter data
-        logger.info(f"Generating mock Twitter data for {ticker}...")
-        tweets_df = twitter_fetcher.fetch_tweets_for_event(
+        # Fetch mock Reddit data
+        logger.info(f"Generating mock Reddit data for {ticker}...")
+        posts_df = reddit_fetcher.fetch_tweets_for_event(
             ticker=ticker,
             event_date=event_date,
             days_before=3,
@@ -374,7 +400,7 @@ def run_demo(args, config, logger):
             max_results=100
         )
 
-        reaction_features = feature_extractor.extract_features(tweets_df, event_date)
+        reaction_features = feature_extractor.extract_features(posts_df, event_date)
 
         # Create maximum variation in features to ensure full quintile distribution
         # This creates signals ranging from very weak to very strong

@@ -87,11 +87,16 @@ class SECDownloader:
                     for filing_folder in ticker_folder.iterdir():
                         if filing_folder.is_dir():
                             for file_path in filing_folder.glob("*.txt"):
+                                # CRITICAL FIX: Extract filing date from accession number or filing metadata
+                                # Accession format: 0001140361-24-038601 (year is in middle segment)
+                                filing_date = self._extract_filing_date(file_path, filing_folder.name)
+
                                 filings_metadata.append({
                                     'ticker': ticker,
                                     'filing_type': filing_type,
                                     'file_path': str(file_path),
                                     'accession_number': filing_folder.name,
+                                    'date': filing_date,  # ADDED: Filing date for event detection
                                     'download_date': datetime.now().strftime("%Y-%m-%d")
                                 })
 
@@ -103,6 +108,56 @@ class SECDownloader:
                 continue
 
         return filings_metadata
+
+    def _extract_filing_date(self, file_path, accession_number: str) -> str:
+        """
+        Extract filing date from SEC filing metadata
+
+        Args:
+            file_path: Path to the SEC filing file
+            accession_number: Filing accession number
+
+        Returns:
+            Filing date in YYYY-MM-DD format
+        """
+        try:
+            # Try to extract from filing content (most accurate)
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read(5000)  # Read first 5KB (header contains date)
+
+                # Look for FILED AS OF DATE or FILING DATE
+                import re
+
+                # Pattern 1: FILED AS OF DATE:        20240801
+                match = re.search(r'FILED AS OF DATE:\s*(\d{8})', content)
+                if match:
+                    date_str = match.group(1)
+                    return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+
+                # Pattern 2: FILING DATE in SGML header
+                match = re.search(r'<FILING-DATE>(\d{8})', content)
+                if match:
+                    date_str = match.group(1)
+                    return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+
+                # Pattern 3: CONFORMED PERIOD OF REPORT
+                match = re.search(r'CONFORMED PERIOD OF REPORT:\s*(\d{8})', content)
+                if match:
+                    date_str = match.group(1)
+                    return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+
+        except Exception as e:
+            print(f"Warning: Could not extract filing date from {file_path}: {e}")
+
+        # Fallback: Use file modification date
+        try:
+            from pathlib import Path
+            file_mod_time = Path(file_path).stat().st_mtime
+            mod_date = datetime.fromtimestamp(file_mod_time)
+            return mod_date.strftime("%Y-%m-%d")
+        except:
+            # Last resort: Use current date
+            return datetime.now().strftime("%Y-%m-%d")
 
     def _generate_mock_filings(self, tickers: List[str], filing_type: str,
                                start_date: str, end_date: str) -> List[Dict]:

@@ -14,20 +14,39 @@ data:
     source: "yfinance"  # yfinance, polygon, quandl
     data_folder: "./data/processed/prices"
 
-  # Twitter/X Data Configuration
-  twitter:
-    bearer_token: ""  # Twitter API v2 Bearer Token (get from developer.twitter.com)
-    use_mock: true  # Set to false when you have a real API token
-    max_tweets_per_ticker: 100
-    days_before_event: 3  # Days before event to collect tweets
-    days_after_event: 7  # Days after event to collect tweets
-    esg_keywords:  # ESG-related keywords to enhance search
+  # Social Media Data Configuration
+  # Default source: Reddit (better for historical data, no API restrictions)
+  # Alternative: Twitter (limited to 7 days history on free tier)
+  social_media:
+    source: "reddit"  # "reddit" or "twitter"
+    max_posts_per_ticker: 200  # INCREASED from 100 to 200 for more sentiment data
+    days_before_event: 7  # INCREASED from 3 to 7 - wider window before event
+    days_after_event: 14  # INCREASED from 7 to 14 - longer reaction period
+    esg_keywords:  # ESG-related keywords (currently ignored - see reddit_fetcher.py)
       - "ESG"
       - "climate"
       - "sustainability"
       - "carbon emissions"
       - "diversity"
       - "governance"
+
+  # Reddit API Configuration (Free, unlimited historical access)
+  reddit:
+    client_id: "lGmL5_M2TWsCAoH_F_ClLQ"  # Real Reddit API credentials
+    client_secret: "dXwV6MG2rQnix99kVjYL59HpShwdWg"
+    user_agent: "ESG Sentiment Trading Bot 1.0"
+    use_mock: false  # Using REAL Reddit API data!
+    subreddits:  # Subreddits to monitor (r/sustainableinvesting removed - returns 404)
+      - "stocks"
+      - "investing"
+      - "StockMarket"
+      - "wallstreetbets"
+      - "ESG_Investing"
+
+  # Twitter/X API Configuration (Free tier: 7 days history only)
+  twitter:
+    bearer_token: ""  # Twitter API v2 Bearer Token
+    use_mock: true  # Set to false when you have Twitter API token
 
   # Fama-French Factors
   factors:

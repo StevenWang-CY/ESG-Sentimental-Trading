@@ -49,7 +49,10 @@ class PerformanceAnalyzer:
         periods_per_year = 252
 
         cagr = self._calculate_cagr()
-        annualized_return = self.returns.mean() * periods_per_year
+        # FIXED: Use CAGR for annualized return (geometric compounding)
+        # Old: annualized_return = self.returns.mean() * periods_per_year (arithmetic)
+        # New: Use CAGR which properly accounts for compounding
+        annualized_return = cagr
         annualized_vol = self.returns.std() * np.sqrt(periods_per_year)
 
         return {
@@ -276,8 +279,70 @@ class PerformanceAnalyzer:
             }
         }
 
+    def _validate_metrics(self, metrics: Dict) -> list:
+        """
+        Validate metrics and return warnings for unrealistic values
+
+        Returns:
+            List of warning messages
+        """
+        warnings = []
+
+        returns = metrics['returns']
+        risk = metrics['risk']
+
+        # Check for unrealistically high Sortino ratio
+        if returns['sortino_ratio'] > 5.0:
+            warnings.append(
+                f"⚠ Sortino ratio ({returns['sortino_ratio']:.2f}) > 5.0 suggests:\n"
+                f"   - Very few downside returns (unrealistic for real markets)\n"
+                f"   - Possible overfitting or mock data with perfect signals\n"
+                f"   - Real-world expectation: 1.5-3.0 for good strategies"
+            )
+
+        # Check for unrealistically high Calmar ratio
+        if returns['calmar_ratio'] > 10.0:
+            warnings.append(
+                f"⚠ Calmar ratio ({returns['calmar_ratio']:.2f}) > 10.0 suggests:\n"
+                f"   - Max drawdown is too small for the returns\n"
+                f"   - Real-world expectation: 2-5 for excellent strategies\n"
+                f"   - Current: {returns['cagr']:.1%} CAGR / {abs(risk['max_drawdown']):.1%} max DD"
+            )
+
+        # Check for unrealistically low max drawdown
+        max_dd_abs = abs(risk['max_drawdown'])
+        if max_dd_abs < 0.05 and max_dd_abs > 0:
+            warnings.append(
+                f"⚠ Max drawdown ({max_dd_abs:.2%}) < 5% is unrealistic:\n"
+                f"   - Real strategies typically see 10-30% drawdowns\n"
+                f"   - With {risk['volatility']:.1%} volatility, expect {risk['volatility']*0.5:.1%}-{risk['volatility']*1.0:.1%} drawdown\n"
+                f"   - This suggests mock data or look-ahead bias"
+            )
+
+        # Check for unrealistically low downside deviation relative to volatility
+        if risk['volatility'] > 0 and risk['downside_deviation'] > 0:
+            dd_ratio = risk['downside_deviation'] / risk['volatility']
+            if dd_ratio < 0.3:  # Downside dev should be 50-100% of volatility for normal distributions
+                warnings.append(
+                    f"⚠ Downside deviation ({risk['downside_deviation']:.1%}) is only {dd_ratio:.0%} of volatility:\n"
+                    f"   - Suggests highly asymmetric returns (too few negative returns)\n"
+                    f"   - Real strategies: downside dev ≈ 50-100% of total volatility\n"
+                    f"   - This indicates unrealistic price behavior"
+                )
+
+        # Check for unrealistically high CAGR
+        if returns['cagr'] > 0.50:  # > 50% annualized
+            warnings.append(
+                f"⚠ CAGR ({returns['cagr']:.1%}) > 50% is exceptional:\n"
+                f"   - Very few strategies sustain this long-term\n"
+                f"   - Real hedge funds: 10-30% CAGR is excellent\n"
+                f"   - Consider if backtest has look-ahead bias or overfitting"
+            )
+
+        return warnings
+
     def print_tear_sheet(self):
-        """Print formatted tear sheet"""
+        """Print formatted tear sheet with validation warnings"""
         metrics = self.generate_tear_sheet()
 
         print("\n" + "="*60)
@@ -313,4 +378,16 @@ class PerformanceAnalyzer:
             else:
                 print(f"{key:30s}: {value}")
 
-        print("="*60 + "\n")
+        print("="*60)
+
+        # Validate metrics and print warnings
+        warnings = self._validate_metrics(metrics)
+        if warnings:
+            print("\n" + "!"*60)
+            print("METRIC VALIDATION WARNINGS")
+            print("!"*60)
+            for warning in warnings:
+                print(f"\n{warning}")
+            print("\n" + "!"*60)
+
+        print()

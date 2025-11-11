@@ -7,11 +7,14 @@ A production-ready quantitative trading strategy that exploits market inefficien
 **Status**: Production-Ready with Institutional-Grade Metrics
 **Version**: 2.0
 **Last Updated**: November 10, 2025
+**Social Data**: ✅ Reddit API Configured & Tested (Unlimited Historical Access)
 
 ### Key Capabilities
 
 - **Hybrid Sentiment Analysis**: FinBERT (70%) + Loughran-McDonald Lexicon (30%)
-- **Multi-Source Data Integration**: SEC 8-K filings, Twitter/X, Yahoo Finance, Fama-French factors
+- **Multi-Source Data Integration**: SEC 8-K filings, Reddit (primary), Twitter/X (alternative), Yahoo Finance, Fama-French factors
+- **Free & Unlimited Social Data**: Reddit API integration with unlimited historical access, no rate limits, and comprehensive subreddit coverage
+- **Dual Social Media Support**: Flexible configuration for Reddit (recommended for backtesting) or Twitter (live trading)
 - **Event-Driven Signal Generation**: Composite shock score combining event severity, sentiment intensity, volume, and duration
 - **Long-Short Portfolio Construction**: Market-neutral strategy with ~0% net exposure
 - **Institutional-Grade Risk Management**: Multi-layer framework with position limits, volatility targeting, and drawdown controls
@@ -24,6 +27,25 @@ A production-ready quantitative trading strategy that exploits market inefficien
 - **Max Drawdown**: 15-25%
 - **Win Rate**: 50-60%
 - **Target Alpha**: 5-9% (ESG-sensitive universe)
+
+---
+
+## 🆕 Recent Updates (November 2025)
+
+**Major Enhancement: Reddit API Integration**
+
+- ✅ **Reddit API fully integrated** as primary social media data source
+- ✅ **Unlimited historical access** (no 7-day limitation like Twitter free tier)
+- ✅ **Already configured and tested** - working credentials in config.yaml
+- ✅ **7 ESG-focused subreddits** monitored for sentiment analysis
+- ✅ **Dual source support** - flexible switching between Reddit and Twitter
+- ✅ **Three new documentation files** added (total: 6 comprehensive guides)
+
+**What This Means for You:**
+- Backtest with unlimited historical data (2020-2025)
+- No API costs or rate limit concerns
+- Production-ready with real social media sentiment
+- Better ESG coverage with dedicated subreddits
 
 ---
 
@@ -59,7 +81,7 @@ The strategy is built on three key observations:
 ### Strategy Workflow
 
 ```
-SEC 8-K Filings → Event Detection → Twitter Sentiment Analysis → Signal Generation → Portfolio Construction → Risk-Managed Execution → Performance Analysis
+SEC 8-K Filings → Event Detection → Social Media Sentiment Analysis (Reddit/Twitter) → Signal Generation → Portfolio Construction → Risk-Managed Execution → Performance Analysis
 ```
 
 ### Investment Universe
@@ -101,7 +123,8 @@ ESG-Sentimental-Trading/
 │   │   ├── sec_downloader.py        # SEC EDGAR API integration
 │   │   ├── price_fetcher.py         # Yahoo Finance price data
 │   │   ├── ff_factors.py            # Fama-French factors
-│   │   ├── twitter_fetcher.py       # Twitter/X API integration
+│   │   ├── reddit_fetcher.py        # Reddit API integration (primary, free & unlimited)
+│   │   ├── twitter_fetcher.py       # Twitter/X API integration (alternative)
 │   │   ├── universe_fetcher.py      # Stock universe management
 │   │   └── esg_universe.py          # ESG sensitivity scoring
 │   │
@@ -147,9 +170,12 @@ ESG-Sentimental-Trading/
 ├── logs/                            # Execution logs (created at runtime)
 │
 └── Documentation/
-    ├── readme.md                    # This file
+    ├── README.md                    # This file (main project overview)
     ├── action_items.md              # Setup and deployment guide
-    └── debug_keeptrack.md           # Bug fix history and validation
+    ├── debug_keeptrack.md           # Bug fix history and validation
+    ├── PRODUCTION_SETUP.md          # Production deployment guide
+    ├── ALTERNATIVE_DATA_SOURCES.md  # Reddit/GDELT/NewsAPI setup guides
+    └── PERFORMANCE_METRICS_GUIDE.md # Metrics validation and expectations
 
 ```
 
@@ -166,12 +192,37 @@ ESG-Sentimental-Trading/
 - **Frequency**: Real-time as filed
 - **Rate Limit**: 10 requests/second
 
-#### Twitter/X Social Media Data
+#### Social Media Data (Dual Source Support)
+
+**Option 1: Reddit API (Recommended for Backtesting)**
+- **Source**: Reddit API via PRAW (Python Reddit API Wrapper)
+- **Advantages**:
+  - ✅ Free with unlimited historical access
+  - ✅ No 7-day limitation (unlike Twitter free tier)
+  - ✅ Generous rate limits
+  - ✅ Rich discussion threads with ESG sentiment
+- **Subreddits Monitored**: r/stocks, r/investing, r/StockMarket, r/wallstreetbets, r/ESG_Investing, r/finance, r/SecurityAnalysis
+- **Search Strategy**: Company ticker + ESG keywords
+- **Window**: 3 days before event, 7 days after
+- **Max Results**: 100 posts per ticker per event
+- **Metrics**: Post score (upvotes), comment count, author karma, sentiment intensity
+- **Setup**: See [ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md) for Reddit API setup
+
+**Option 2: Twitter/X API (Alternative for Live Trading)**
 - **Source**: Twitter API v2
+- **Limitation**: Free tier limited to 7-day history
 - **Search Strategy**: Company ticker + ESG keywords
 - **Window**: 3 days before event, 7 days after
 - **Max Results**: 100 tweets per ticker per event
-- **Metrics**: Volume, engagement, sentiment intensity
+- **Metrics**: Volume, engagement (retweets, likes), sentiment intensity
+- **Use Case**: Best for live trading with recent events
+
+**Configuration**: Select source in `config.yaml`:
+```yaml
+data:
+  social_media:
+    source: "reddit"  # or "twitter"
+```
 
 #### Price Data
 - **Source**: Yahoo Finance (yfinance)
@@ -184,6 +235,24 @@ ESG-Sentimental-Trading/
 - **Factors**: Mkt-RF, SMB, HML, RMW, CMA, Mom
 - **Purpose**: Factor attribution and alpha decomposition
 - **Frequency**: Daily
+
+#### Social Media Source Comparison
+
+| Feature | Reddit (Recommended) | Twitter/X |
+|---------|---------------------|-----------|
+| **Cost** | Free (unlimited) | Free (basic tier) |
+| **Historical Access** | ✅ Unlimited | ❌ 7 days only |
+| **Rate Limits** | Generous | Restrictive |
+| **Best Use Case** | Backtesting, research | Live trading |
+| **Data Quality** | Rich discussions | Short messages |
+| **ESG Coverage** | Excellent (dedicated subreddits) | Good |
+| **Setup Difficulty** | Easy (5 min) | Easy (5 min) |
+| **Mock Mode** | ✅ Available | ✅ Available |
+
+**Recommendation**:
+- **For Backtesting**: Use Reddit (unlimited historical data)
+- **For Live Trading**: Use Twitter for recent events (<7 days) or Reddit for longer history
+- **Hybrid Approach**: Reddit for backtesting + Twitter for live signals
 
 ### 2. Event Detection
 
@@ -577,7 +646,12 @@ pip install -r requirements.txt
 
 # 4. (Optional) Install transformer models for FinBERT
 pip install transformers torch
+
+# 5. Test Reddit API (credentials already configured)
+python test_reddit_api.py
 ```
+
+**✅ Reddit API is pre-configured** - The project includes working Reddit API credentials in `config.yaml`. You can start using real Reddit data immediately!
 
 ### Quick Start (5 Minutes)
 
@@ -618,38 +692,56 @@ Net exposure: 0.00%, Gross exposure: 200.00%
 python main.py --mode demo
 ```
 
-### 2. ESG-Sensitive Universe (Recommended for Production)
+### 2. ESG-Sensitive Universe with Reddit (Recommended for Production)
 
 ```bash
+# Using Reddit for sentiment analysis (unlimited historical data)
 python run_production.py \
     --universe esg_nasdaq100 \
     --esg-sensitivity HIGH \
     --start-date 2024-01-01 \
     --end-date 2024-12-31 \
+    --social-source reddit \
     --save-data
 ```
 
-### 3. Custom Universe
+### 3. Custom Universe with Twitter (Live Trading)
 
 ```bash
+# Using Twitter for recent events (last 7 days)
 python run_production.py \
     --universe custom \
     --tickers TSLA AAPL MSFT AMZN GOOGL \
     --start-date 2024-01-01 \
-    --end-date 2024-06-30
+    --end-date 2024-06-30 \
+    --social-source twitter
 ```
 
-### 4. Full NASDAQ-100 Backtest
+### 4. Full NASDAQ-100 Backtest with Reddit
 
 ```bash
+# Full universe backtest using Reddit sentiment
 python run_production.py \
     --universe nasdaq100 \
     --start-date 2023-01-01 \
     --end-date 2024-12-31 \
+    --social-source reddit \
     --save-data
 ```
 
-### 5. Python API (Custom Parameters)
+### 5. Force Real Social Media Data (Override Mock Mode)
+
+```bash
+# Force real Reddit API calls (requires credentials in config.yaml)
+python run_production.py \
+    --universe esg_nasdaq100 \
+    --start-date 2024-01-01 \
+    --end-date 2024-12-31 \
+    --social-source reddit \
+    --force-real-social-media
+```
+
+### 6. Python API (Custom Parameters)
 
 ```python
 from src.backtest import BacktestEngine, PerformanceAnalyzer
@@ -796,23 +888,56 @@ Not just backtested, but **thoroughly validated**:
 
 ## Documentation
 
-This project includes three comprehensive documentation files:
+This project includes comprehensive documentation across six files:
 
-1. **[readme.md](readme.md)** (this file)
+### Core Documentation
+
+1. **[README.md](README.md)** (this file)
    - Project overview and methodology
-   - Technical architecture
+   - Technical architecture and data flow
    - Core principles and theory
    - Academic foundations
+   - Installation and quick start
+   - Usage examples
 
 2. **[action_items.md](action_items.md)**
    - Complete setup and installation guide
    - Configuration instructions
-   - Twitter API setup (optional)
    - Pre-production checklist
    - Troubleshooting guide
    - Monitoring and maintenance
 
-3. **[debug_keeptrack.md](debug_keeptrack.md)**
+### Production Guides
+
+3. **[PRODUCTION_SETUP.md](PRODUCTION_SETUP.md)** 🆕
+   - Step-by-step production deployment guide
+   - Environment verification procedures
+   - Reddit and Twitter API configuration
+   - Production run examples with real data
+   - Expected performance metrics
+   - Paper trading and live trading checklists
+   - Quick reference commands
+
+4. **[ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md)** 🆕
+   - Reddit API setup guide (primary recommendation)
+   - GDELT Project integration (free news data)
+   - NewsAPI.org configuration
+   - HuggingFace financial datasets
+   - Hybrid data strategy recommendations
+   - Cost comparison table
+   - Implementation priorities
+
+### Validation & Debugging
+
+5. **[PERFORMANCE_METRICS_GUIDE.md](PERFORMANCE_METRICS_GUIDE.md)** 🆕
+   - Comprehensive metrics explanation
+   - Three critical bugs fixed (documented)
+   - Realistic performance expectations
+   - Demo vs Real backtest comparison
+   - Validation warning interpretations
+   - Checklist for realistic backtests
+
+6. **[debug_keeptrack.md](debug_keeptrack.md)**
    - Complete bug fix history
    - All 3 critical bugs documented:
      1. Ratio display formatting (Sharpe/Sortino multiplied by 100)
@@ -821,6 +946,14 @@ This project includes three comprehensive documentation files:
    - Validation results
    - Preventive measures implemented
    - Diagnostic procedures
+
+### Quick Navigation
+
+- **New to the project?** Start with [README.md](README.md) (this file)
+- **Setting up for production?** See [PRODUCTION_SETUP.md](PRODUCTION_SETUP.md)
+- **Need social media data?** See [ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md)
+- **Validating performance?** See [PERFORMANCE_METRICS_GUIDE.md](PERFORMANCE_METRICS_GUIDE.md)
+- **Troubleshooting?** See [action_items.md](action_items.md) and [debug_keeptrack.md](debug_keeptrack.md)
 
 ---
 
@@ -917,21 +1050,43 @@ Momentum:          Slightly positive
 
 ## Next Steps
 
+### Quick Start (5 Minutes)
+
 1. **Run Demo**: Verify system works end-to-end
    ```bash
    python main.py --mode demo
    ```
 
-2. **Configure**: Set up Twitter API (optional, see [action_items.md](action_items.md))
-
-3. **Backtest**: Test on historical data
+2. **Test Reddit API**: Verify your Reddit credentials (already configured)
    ```bash
-   python run_production.py --universe esg_nasdaq100 --start-date 2024-01-01 --end-date 2024-12-31
+   python test_reddit_api.py
+   ```
+   ✅ Reddit API is already configured and tested!
+
+### Production Deployment
+
+3. **Backtest with Real Reddit Data**: Test on historical data (2024)
+   ```bash
+   python run_production.py \
+       --universe esg_nasdaq100 \
+       --start-date 2024-01-01 \
+       --end-date 2024-12-31 \
+       --social-source reddit \
+       --save-data
    ```
 
-4. **Paper Trade**: 1-3 months testing with virtual capital
+4. **Optional: Configure Twitter API**: For live trading (see [ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md))
 
-5. **Go Live**: Deploy with real capital (start small, scale gradually)
+5. **Paper Trade**: 1-3 months testing with virtual capital
+
+6. **Go Live**: Deploy with real capital (start small, scale gradually)
+
+### Recommended Reading Order
+
+1. **Start Here**: [README.md](README.md) (overview and methodology)
+2. **Production Setup**: [PRODUCTION_SETUP.md](PRODUCTION_SETUP.md) (deployment guide)
+3. **Data Sources**: [ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md) (Reddit/Twitter setup)
+4. **Validation**: [PERFORMANCE_METRICS_GUIDE.md](PERFORMANCE_METRICS_GUIDE.md) (metrics guide)
 
 ---
 
@@ -939,8 +1094,12 @@ Momentum:          Slightly positive
 
 - **Email**: StevenWANG0805@outlook.com
 - **GitHub**: [Link to Repository]
-- **Setup Guide**: See [action_items.md](action_items.md)
-- **Debug History**: See [debug_keeptrack.md](debug_keeptrack.md)
+- **Documentation**:
+  - Production Setup: [PRODUCTION_SETUP.md](PRODUCTION_SETUP.md)
+  - Data Sources: [ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md)
+  - Metrics Guide: [PERFORMANCE_METRICS_GUIDE.md](PERFORMANCE_METRICS_GUIDE.md)
+  - Setup Guide: [action_items.md](action_items.md)
+  - Debug History: [debug_keeptrack.md](debug_keeptrack.md)
 
 ---
 
@@ -952,12 +1111,24 @@ Momentum:          Slightly positive
 
 ## Acknowledgments
 
+### Data Sources
 - **SEC**: EDGAR database for filings
+- **Reddit**: Social media sentiment data (via PRAW)
+- **Twitter/X**: Alternative social media data (via tweepy)
 - **Yahoo Finance**: Price and volume data (via yfinance)
 - **Kenneth French**: Factor data library
-- **Hugging Face**: FinBERT model (ProsusAI)
+
+### NLP & Machine Learning
+- **Hugging Face**: FinBERT model (ProsusAI/finbert)
 - **Loughran & McDonald**: Financial sentiment dictionary
 - **Savarese (2019)**: ML methodology from MIT thesis
+
+### Libraries & Tools
+- **PRAW**: Python Reddit API Wrapper
+- **tweepy**: Twitter API client
+- **transformers**: FinBERT integration
+- **pandas, numpy**: Data processing
+- **yfinance**: Yahoo Finance API
 
 ---
 

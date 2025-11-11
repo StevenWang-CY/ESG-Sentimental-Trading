@@ -1,6 +1,6 @@
 """
 Production Runner for ESG Event-Driven Alpha Strategy
-Runs on real NASDAQ-100 stocks with real Twitter data
+Runs on real NASDAQ-100 stocks with real social media data (Reddit/Twitter)
 """
 
 import argparse
@@ -13,7 +13,7 @@ import sys
 
 # Import project modules
 from src.utils.logging_config import setup_logging
-from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher
+from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher, RedditFetcher
 from src.data.universe_fetcher import UniverseFetcher
 from src.preprocessing import SECFilingParser, TextCleaner
 from src.nlp import ESGEventDetector, FinancialSentimentAnalyzer, ReactionFeatureExtractor
@@ -28,32 +28,64 @@ def load_config(config_path: str = 'config/config.yaml'):
     return config
 
 
-def validate_twitter_config(config):
-    """Validate Twitter API configuration"""
-    twitter_config = config.get('data', {}).get('twitter', {})
+def validate_social_media_config(config):
+    """Validate social media API configuration (Reddit or Twitter)"""
+    social_media_config = config.get('data', {}).get('social_media', {})
+    source = social_media_config.get('source', 'reddit').lower()
 
-    if twitter_config.get('use_mock', True):
-        print("\n" + "="*60)
-        print("WARNING: Running in MOCK DATA mode")
-        print("="*60)
-        print("To use real Twitter data:")
-        print("1. Set 'use_mock: false' in config/config.yaml")
-        print("2. Add your Twitter Bearer Token to config/config.yaml")
-        print("3. See TWITTER_SETUP.md for instructions")
-        print("="*60 + "\n")
-        return False
+    if source == 'reddit':
+        reddit_config = config.get('data', {}).get('reddit', {})
 
-    bearer_token = twitter_config.get('bearer_token', '')
-    if not bearer_token or bearer_token == '':
-        print("\n" + "="*60)
-        print("ERROR: No Twitter Bearer Token configured")
-        print("="*60)
-        print("Please add your Twitter API Bearer Token to config/config.yaml")
-        print("See TWITTER_SETUP.md for setup instructions")
-        print("="*60 + "\n")
-        sys.exit(1)
+        if reddit_config.get('use_mock', True):
+            print("\n" + "="*60)
+            print("INFO: Running in MOCK DATA mode (Reddit)")
+            print("="*60)
+            print("To use real Reddit data:")
+            print("1. Get Reddit API credentials from reddit.com/prefs/apps")
+            print("2. Set 'use_mock: false' in config/config.yaml")
+            print("3. Add your Reddit client_id and client_secret to config/config.yaml")
+            print("4. See ALTERNATIVE_DATA_SOURCES.md for instructions")
+            print("="*60 + "\n")
+            return False, 'reddit'
 
-    return True
+        client_id = reddit_config.get('client_id', '')
+        client_secret = reddit_config.get('client_secret', '')
+        if not client_id or not client_secret:
+            print("\n" + "="*60)
+            print("ERROR: No Reddit API credentials configured")
+            print("="*60)
+            print("Please add your Reddit API credentials to config/config.yaml")
+            print("See ALTERNATIVE_DATA_SOURCES.md for setup instructions")
+            print("="*60 + "\n")
+            sys.exit(1)
+
+        return True, 'reddit'
+
+    else:  # twitter
+        twitter_config = config.get('data', {}).get('twitter', {})
+
+        if twitter_config.get('use_mock', True):
+            print("\n" + "="*60)
+            print("WARNING: Running in MOCK DATA mode (Twitter)")
+            print("="*60)
+            print("To use real Twitter data:")
+            print("1. Set 'use_mock: false' in config/config.yaml")
+            print("2. Add your Twitter Bearer Token to config/config.yaml")
+            print("3. See ALTERNATIVE_DATA_SOURCES.md for instructions")
+            print("="*60 + "\n")
+            return False, 'twitter'
+
+        bearer_token = twitter_config.get('bearer_token', '')
+        if not bearer_token or bearer_token == '':
+            print("\n" + "="*60)
+            print("ERROR: No Twitter Bearer Token configured")
+            print("="*60)
+            print("Please add your Twitter API Bearer Token to config/config.yaml")
+            print("See ALTERNATIVE_DATA_SOURCES.md for setup instructions")
+            print("="*60 + "\n")
+            sys.exit(1)
+
+        return True, 'twitter'
 
 
 def main():
@@ -81,8 +113,10 @@ def main():
                        help='Limit number of tickers to process')
     parser.add_argument('--save-data', action='store_true',
                        help='Save intermediate data to disk')
-    parser.add_argument('--force-real-twitter', action='store_true',
-                       help='Force real Twitter API (override mock mode)')
+    parser.add_argument('--force-real-social-media', action='store_true',
+                       help='Force real social media API (override mock mode)')
+    parser.add_argument('--social-source', type=str, choices=['reddit', 'twitter'],
+                       help='Override social media source (reddit or twitter)')
 
     args = parser.parse_args()
 
@@ -121,11 +155,19 @@ def main():
         logger.error("Please use YYYY-MM-DD format")
         sys.exit(1)
 
-    # Validate Twitter configuration
-    if args.force_real_twitter:
-        config['data']['twitter']['use_mock'] = False
+    # Override social media source if specified
+    if args.social_source:
+        config['data']['social_media']['source'] = args.social_source
 
-    use_real_twitter = validate_twitter_config(config)
+    # Validate social media configuration
+    if args.force_real_social_media:
+        source = config['data']['social_media'].get('source', 'reddit')
+        if source == 'reddit':
+            config['data']['reddit']['use_mock'] = False
+        else:
+            config['data']['twitter']['use_mock'] = False
+
+    use_real_data, social_source = validate_social_media_config(config)
 
     # Step 1: Get stock universe
     logger.info("\n>>> STEP 1: FETCHING STOCK UNIVERSE")
@@ -180,10 +222,10 @@ def main():
 
         all_filings.extend(filings)
 
-        # Rate limiting
-        if i < len(tickers) - 1 and not sec_downloader.use_mock:
+        # Rate limiting (SEC allows 10 requests/second)
+        if i < len(tickers) - 1:
             import time
-            time.sleep(0.1)  # SEC allows 10 requests/second
+            time.sleep(0.1)
 
     logger.info(f"Downloaded {len(all_filings)} SEC filings")
 
@@ -224,7 +266,8 @@ def main():
     logger.info(f"Loaded {len(factors)} periods of factor data")
 
     # Step 5: Event Detection & Sentiment Analysis
-    logger.info("\n>>> STEP 5: EVENT DETECTION & TWITTER SENTIMENT ANALYSIS")
+    source_name = "Reddit" if social_source == 'reddit' else "Twitter"
+    logger.info(f"\n>>> STEP 5: EVENT DETECTION & {source_name.upper()} SENTIMENT ANALYSIS")
 
     # Initialize NLP components
     parser = SECFilingParser()
@@ -233,17 +276,28 @@ def main():
     sentiment_analyzer = FinancialSentimentAnalyzer()
     feature_extractor = ReactionFeatureExtractor(sentiment_analyzer)
 
-    # Initialize Twitter fetcher
-    twitter_config = config['data']['twitter']
-    twitter_fetcher = TwitterFetcher(
-        bearer_token=twitter_config.get('bearer_token') if not twitter_config.get('use_mock') else None,
-        use_mock=twitter_config.get('use_mock', True)
-    )
+    # Initialize social media fetcher (Reddit or Twitter)
+    social_media_config = config['data']['social_media']
 
-    if use_real_twitter:
-        logger.info("✓ Using REAL Twitter API")
+    if social_source == 'reddit':
+        reddit_config = config['data']['reddit']
+        social_media_fetcher = RedditFetcher(
+            client_id=reddit_config.get('client_id'),
+            client_secret=reddit_config.get('client_secret'),
+            user_agent=reddit_config.get('user_agent', 'ESG Sentiment Trading Bot 1.0'),
+            use_mock=reddit_config.get('use_mock', True)
+        )
+    else:  # twitter
+        twitter_config = config['data']['twitter']
+        social_media_fetcher = TwitterFetcher(
+            bearer_token=twitter_config.get('bearer_token') if not twitter_config.get('use_mock') else None,
+            use_mock=twitter_config.get('use_mock', True)
+        )
+
+    if use_real_data:
+        logger.info(f"✓ Using REAL {source_name} API")
     else:
-        logger.info("⚠ Using MOCK Twitter data")
+        logger.info(f"⚠ Using MOCK {source_name} data")
 
     events_data = []
 
@@ -266,27 +320,27 @@ def main():
                 logger.info(f"  ✓ ESG Event detected: {event_result['category']} "
                           f"(confidence: {event_result['confidence']:.2f})")
 
-                # Fetch Twitter data
+                # Fetch social media data
                 event_date = datetime.strptime(filing.get('date', args.start_date), '%Y-%m-%d')
-                logger.info(f"  Fetching Twitter data around {event_date.date()}...")
+                logger.info(f"  Fetching {source_name} data around {event_date.date()}...")
 
-                tweets_df = twitter_fetcher.fetch_tweets_for_event(
+                posts_df = social_media_fetcher.fetch_tweets_for_event(
                     ticker=filing['ticker'],
                     event_date=event_date,
-                    keywords=twitter_config.get('esg_keywords', []),
-                    days_before=twitter_config.get('days_before_event', 3),
-                    days_after=twitter_config.get('days_after_event', 7),
-                    max_results=twitter_config.get('max_tweets_per_ticker', 100)
+                    keywords=social_media_config.get('esg_keywords', []),
+                    days_before=social_media_config.get('days_before_event', 3),
+                    days_after=social_media_config.get('days_after_event', 7),
+                    max_results=social_media_config.get('max_posts_per_ticker', 100)
                 )
 
-                if tweets_df.empty:
-                    logger.warning(f"  ⚠ No tweets found for {filing['ticker']}")
+                if posts_df.empty:
+                    logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}")
                     continue
 
                 # Extract reaction features
-                reaction_features = feature_extractor.extract_features(tweets_df, event_date)
+                reaction_features = feature_extractor.extract_features(posts_df, event_date)
 
-                logger.info(f"  Tweets: {reaction_features['n_tweets']}, "
+                logger.info(f"  Posts: {reaction_features['n_tweets']}, "
                           f"Intensity: {reaction_features['intensity']:.3f}, "
                           f"Volume: {reaction_features['volume_ratio']:.2f}x")
 
@@ -301,7 +355,7 @@ def main():
             logger.error(f"  Error processing filing: {e}")
             continue
 
-    logger.info(f"\nDetected {len(events_data)} ESG events with Twitter reactions")
+    logger.info(f"\nDetected {len(events_data)} ESG events with {source_name} reactions")
 
     if args.save_data:
         events_file = f"data/events_{args.start_date}_to_{args.end_date}.pkl"
@@ -313,7 +367,7 @@ def main():
         logger.info("\nPossible reasons:")
         logger.info("- No 8-K filings in date range")
         logger.info("- Events didn't meet confidence threshold")
-        logger.info("- No Twitter activity for detected events")
+        logger.info(f"- No {source_name} activity for detected events")
         return
 
     # Step 6: Signal Generation
