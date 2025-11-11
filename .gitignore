@@ -38,10 +38,23 @@ data/signals/*
 !data/processed/.gitkeep
 !data/signals/.gitkeep
 
+# Backtest data files (keep only most recent comprehensive runs)
+data/*.pkl
+data/*.csv
+data/events_*.pkl
+data/filings_*.pkl
+data/prices_*.pkl
+data/portfolio_*.csv
+data/signals_*.csv
+data/universe_*.csv
+
 # Results
 results/figures/*
 results/tear_sheets/*
 results/factor_analysis/*
+results/visualizations/*
+results/plots/*
+results/backtest/*
 !results/figures/.gitkeep
 !results/tear_sheets/.gitkeep
 !results/factor_analysis/.gitkeep
@@ -75,3 +88,7 @@ models/
 *.tmp
 *.bak
 temp/
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
