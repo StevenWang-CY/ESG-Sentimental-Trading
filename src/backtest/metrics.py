@@ -64,12 +64,16 @@ class PerformanceAnalyzer:
 
     def _calculate_risk_metrics(self) -> Dict:
         """Calculate risk metrics"""
+        # CRITICAL: Annualize downside deviation for consistency with volatility
+        downside_dev_daily = self._calculate_downside_deviation()
+        downside_dev_annualized = downside_dev_daily * np.sqrt(252)
+
         return {
             'max_drawdown': self._calculate_max_drawdown(),
             'avg_drawdown': self._calculate_avg_drawdown(),
             'var_95': self._calculate_var(0.95),
             'cvar_95': self._calculate_cvar(0.95),
-            'downside_deviation': self._calculate_downside_deviation(),
+            'downside_deviation': downside_dev_annualized,  # FIXED: Now annualized
             'volatility': self.returns.std() * np.sqrt(252)
         }
 
@@ -186,14 +190,14 @@ class PerformanceAnalyzer:
 
     def _calculate_downside_deviation(self, returns: pd.Series = None, threshold: float = 0) -> float:
         """
-        Calculate downside deviation
+        Calculate downside deviation (DAILY, not annualized)
 
         Args:
             returns: Returns series to use (default: self.returns)
             threshold: Threshold below which returns are considered "downside" (default: 0)
 
         Returns:
-            Annualized downside deviation
+            DAILY downside deviation (for Sortino, multiply by sqrt(252) to annualize)
         """
         if returns is None:
             returns = self.returns

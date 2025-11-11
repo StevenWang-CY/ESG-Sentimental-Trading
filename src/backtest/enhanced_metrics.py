@@ -179,6 +179,12 @@ class EnhancedPerformanceAnalyzer:
 
     def _calculate_risk_metrics(self) -> Dict:
         """Calculate comprehensive risk metrics"""
+        # CRITICAL: Annualize downside deviation for consistency with volatility
+        # Sortino uses daily downside dev internally (with sqrt(252) factor)
+        # But for display, downside dev should be annualized like volatility
+        downside_dev_daily = self._calculate_downside_deviation()
+        downside_dev_annualized = downside_dev_daily * np.sqrt(252)
+
         metrics = {
             'max_drawdown': self._calculate_max_drawdown(),
             'avg_drawdown': self._calculate_avg_drawdown(),
@@ -186,7 +192,7 @@ class EnhancedPerformanceAnalyzer:
             'cvar_95': self._calculate_cvar(0.95),
             'var_99': self._calculate_var(0.99),  # NEW
             'cvar_99': self._calculate_cvar(0.99),  # NEW
-            'downside_deviation': self._calculate_downside_deviation(),
+            'downside_deviation': downside_dev_annualized,  # FIXED: Now annualized
             'volatility': self.returns.std() * np.sqrt(252),
             'max_consecutive_losses': self._calculate_max_consecutive_losses(),  # NEW
             'max_consecutive_wins': self._calculate_max_consecutive_wins(),  # NEW
@@ -628,6 +634,13 @@ class EnhancedPerformanceAnalyzer:
         if abs(sortino) > 10:
             warnings.append(f"Sortino ratio {sortino:.2f} is unrealistic (typical: -3 to +5)")
 
+        # Check Sortino/Sharpe ratio consistency
+        if sharpe != 0 and sortino != 0:
+            sortino_sharpe_ratio = abs(sortino / sharpe)
+            if sortino_sharpe_ratio > 5:
+                warnings.append(f"Sortino/Sharpe ratio {sortino_sharpe_ratio:.1f}x is too high (typical: 1.2-2.0x). "
+                               f"Check downside deviation calculation.")
+
         # Check Calmar ratio
         calmar = metrics['returns'].get('calmar_ratio', 0)
         if abs(calmar) > 20:
@@ -647,6 +660,28 @@ class EnhancedPerformanceAnalyzer:
         vol = metrics['risk'].get('volatility', 0)
         if vol < 0.01:
             warnings.append(f"Volatility {vol:.2%} is unrealistically low (typical: 10-50%)")
+
+        # Check downside deviation vs volatility
+        downside_dev = metrics['risk'].get('downside_deviation', 0)
+        if vol > 0:
+            dd_vol_ratio = downside_dev / vol
+            # For normal distribution, ratio should be ~0.707 (sqrt(0.5))
+            # Allow range of 0.4 to 0.9
+            if dd_vol_ratio < 0.4:
+                warnings.append(f"Downside deviation {downside_dev:.2%} is too low vs volatility {vol:.2%} "
+                               f"(ratio: {dd_vol_ratio:.1%}, expected: ~70%). Possible data issues.")
+            elif dd_vol_ratio > 0.9:
+                warnings.append(f"Downside deviation {downside_dev:.2%} is too high vs volatility {vol:.2%} "
+                               f"(ratio: {dd_vol_ratio:.1%}, expected: ~70%). Very negative skew.")
+
+        # Check drawdown vs volatility
+        max_dd = abs(metrics['risk'].get('max_drawdown', 0))
+        if vol > 0:
+            # Rule of thumb: max DD should be at least 2x volatility over a year
+            expected_min_dd = vol * 2
+            if max_dd < expected_min_dd and metrics['summary'].get('n_periods', 0) > 100:
+                warnings.append(f"Max drawdown {max_dd:.2%} is unrealistically low for volatility {vol:.2%}. "
+                               f"Expected at least {expected_min_dd:.2%}. Possible look-ahead bias.")
 
         return warnings
 
