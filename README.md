@@ -39,7 +39,7 @@ A production-ready quantitative trading strategy that exploits market inefficien
 - ✅ **Already configured and tested** - working credentials in config.yaml
 - ✅ **7 ESG-focused subreddits** monitored for sentiment analysis
 - ✅ **Dual source support** - flexible switching between Reddit and Twitter
-- ✅ **Three new documentation files** added (total: 6 comprehensive guides)
+- ✅ **Comprehensive documentation** organized into 3 core files
 
 **What This Means for You:**
 - Backtest with unlimited historical data (2020-2025)
@@ -171,11 +171,8 @@ ESG-Sentimental-Trading/
 │
 └── Documentation/
     ├── README.md                    # This file (main project overview)
-    ├── action_items.md              # Setup and deployment guide
-    ├── debug_keeptrack.md           # Bug fix history and validation
-    ├── PRODUCTION_SETUP.md          # Production deployment guide
-    ├── ALTERNATIVE_DATA_SOURCES.md  # Reddit/GDELT/NewsAPI setup guides
-    └── PERFORMANCE_METRICS_GUIDE.md # Metrics validation and expectations
+    ├── action_items.md              # Complete setup, deployment & troubleshooting guide
+    └── debug_keeptrack.md           # Bug fixes, validation & performance metrics
 
 ```
 
@@ -206,7 +203,7 @@ ESG-Sentimental-Trading/
 - **Window**: 3 days before event, 7 days after
 - **Max Results**: 100 posts per ticker per event
 - **Metrics**: Post score (upvotes), comment count, author karma, sentiment intensity
-- **Setup**: See [ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md) for Reddit API setup
+- **Setup**: See [action_items.md](action_items.md) for Reddit API setup
 
 **Option 2: Twitter/X API (Alternative for Live Trading)**
 - **Source**: Twitter API v2
@@ -888,72 +885,51 @@ Not just backtested, but **thoroughly validated**:
 
 ## Documentation
 
-This project includes comprehensive documentation across six files:
+This project includes comprehensive documentation across three core files:
 
-### Core Documentation
+### 1. **[README.md](README.md)** (this file)
+   - **Purpose**: Project overview and technical documentation
+   - **Contents**:
+     - Executive summary and key capabilities
+     - Core methodology and strategy workflow
+     - Technical architecture and data flow
+     - ESG event detection and sentiment analysis
+     - Signal generation and portfolio construction
+     - Risk management framework
+     - ML enhancements and academic foundations
+     - Installation and usage examples
 
-1. **[README.md](README.md)** (this file)
-   - Project overview and methodology
-   - Technical architecture and data flow
-   - Core principles and theory
-   - Academic foundations
-   - Installation and quick start
-   - Usage examples
+### 2. **[action_items.md](action_items.md)** - Setup & Deployment Guide
+   - **Purpose**: Complete hands-on guide for setup and production deployment
+   - **Contents**:
+     - Quick start (5-minute setup)
+     - Reddit API setup guide (step-by-step)
+     - Twitter API setup (alternative)
+     - Configuration examples and recommendations
+     - Production deployment workflows
+     - Expected performance metrics
+     - Troubleshooting common issues
+     - Paper trading and live deployment checklists
+     - Alternative data sources (GDELT, NewsAPI)
+     - Quick reference commands
 
-2. **[action_items.md](action_items.md)**
-   - Complete setup and installation guide
-   - Configuration instructions
-   - Pre-production checklist
-   - Troubleshooting guide
-   - Monitoring and maintenance
-
-### Production Guides
-
-3. **[PRODUCTION_SETUP.md](PRODUCTION_SETUP.md)** 🆕
-   - Step-by-step production deployment guide
-   - Environment verification procedures
-   - Reddit and Twitter API configuration
-   - Production run examples with real data
-   - Expected performance metrics
-   - Paper trading and live trading checklists
-   - Quick reference commands
-
-4. **[ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md)** 🆕
-   - Reddit API setup guide (primary recommendation)
-   - GDELT Project integration (free news data)
-   - NewsAPI.org configuration
-   - HuggingFace financial datasets
-   - Hybrid data strategy recommendations
-   - Cost comparison table
-   - Implementation priorities
-
-### Validation & Debugging
-
-5. **[PERFORMANCE_METRICS_GUIDE.md](PERFORMANCE_METRICS_GUIDE.md)** 🆕
-   - Comprehensive metrics explanation
-   - Three critical bugs fixed (documented)
-   - Realistic performance expectations
-   - Demo vs Real backtest comparison
-   - Validation warning interpretations
-   - Checklist for realistic backtests
-
-6. **[debug_keeptrack.md](debug_keeptrack.md)**
-   - Complete bug fix history
-   - All 3 critical bugs documented:
-     1. Ratio display formatting (Sharpe/Sortino multiplied by 100)
-     2. Trade returns calculation (position tracking)
-     3. Downside deviation annualization (statistical consistency)
-   - Validation results
-   - Preventive measures implemented
-   - Diagnostic procedures
+### 3. **[debug_keeptrack.md](debug_keeptrack.md)** - Validation & Metrics Guide
+   - **Purpose**: Bug fixes, performance validation, and metrics interpretation
+   - **Contents**:
+     - Complete bug fix history (3 critical bugs)
+     - Before/after comparisons
+     - Preventive measures implemented
+     - Performance metrics guide
+     - Demo vs real backtest expectations
+     - Validation warning interpretations
+     - Checklist for realistic backtests
+     - Statistical consistency checks
 
 ### Quick Navigation
 
 - **New to the project?** Start with [README.md](README.md) (this file)
-- **Setting up for production?** See [PRODUCTION_SETUP.md](PRODUCTION_SETUP.md)
-- **Need social media data?** See [ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md)
-- **Validating performance?** See [PERFORMANCE_METRICS_GUIDE.md](PERFORMANCE_METRICS_GUIDE.md)
-- **Troubleshooting?** See [action_items.md](action_items.md) and [debug_keeptrack.md](debug_keeptrack.md)
+- **Setting up for production?** See [action_items.md](action_items.md)
+- **Troubleshooting or validating?** See [action_items.md](action_items.md) and [debug_keeptrack.md](debug_keeptrack.md)
 
 ---
 
@@ -1075,7 +1051,7 @@ Momentum:          Slightly positive
        --save-data
    ```
 
-4. **Optional: Configure Twitter API**: For live trading (see [ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md))
+4. **Optional: Configure Twitter API**: For live trading (see [action_items.md](action_items.md))
 
 5. **Paper Trade**: 1-3 months testing with virtual capital
 
@@ -1084,22 +1060,18 @@ Momentum:          Slightly positive
 ### Recommended Reading Order
 
 1. **Start Here**: [README.md](README.md) (overview and methodology)
-2. **Production Setup**: [PRODUCTION_SETUP.md](PRODUCTION_SETUP.md) (deployment guide)
-3. **Data Sources**: [ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md) (Reddit/Twitter setup)
-4. **Validation**: [PERFORMANCE_METRICS_GUIDE.md](PERFORMANCE_METRICS_GUIDE.md) (metrics guide)
+2. **Setup & Deploy**: [action_items.md](action_items.md) (complete setup and deployment guide)
+3. **Validation**: [debug_keeptrack.md](debug_keeptrack.md) (bugs fixed and metrics guide)
 
 ---
 
 ## Contact & Support
 
 - **Email**: StevenWANG0805@outlook.com
-- **GitHub**: [Link to Repository]
+- **GitHub**: [https://github.com/stevenwang2029/ESG-Sentimental-Trading](https://github.com/stevenwang2029/ESG-Sentimental-Trading)
 - **Documentation**:
-  - Production Setup: [PRODUCTION_SETUP.md](PRODUCTION_SETUP.md)
-  - Data Sources: [ALTERNATIVE_DATA_SOURCES.md](ALTERNATIVE_DATA_SOURCES.md)
-  - Metrics Guide: [PERFORMANCE_METRICS_GUIDE.md](PERFORMANCE_METRICS_GUIDE.md)
-  - Setup Guide: [action_items.md](action_items.md)
-  - Debug History: [debug_keeptrack.md](debug_keeptrack.md)
+  - Setup & Deployment: [action_items.md](action_items.md)
+  - Validation & Metrics: [debug_keeptrack.md](debug_keeptrack.md)
 
 ---
 

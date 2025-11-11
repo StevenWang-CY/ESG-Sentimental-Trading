@@ -391,3 +391,54 @@ class PerformanceAnalyzer:
             print("\n" + "!"*60)
 
         print()
+
+    def save_tear_sheet(self, filepath: str):
+        """Save formatted tear sheet to file"""
+        metrics = self.generate_tear_sheet()
+
+        with open(filepath, 'w') as f:
+            f.write("="*60 + "\n")
+            f.write("PERFORMANCE TEAR SHEET\n")
+            f.write("="*60 + "\n")
+
+            f.write("\nRETURN METRICS:\n")
+            f.write("-"*60 + "\n")
+            for key, value in metrics['returns'].items():
+                if isinstance(value, float):
+                    if key in ['sharpe_ratio', 'sortino_ratio', 'calmar_ratio']:
+                        f.write(f"{key:30s}: {value:10.2f}\n")
+                    else:
+                        f.write(f"{key:30s}: {value:10.2%}\n")
+
+            f.write("\nRISK METRICS:\n")
+            f.write("-"*60 + "\n")
+            for key, value in metrics['risk'].items():
+                if isinstance(value, float):
+                    f.write(f"{key:30s}: {value:10.2%}\n")
+
+            f.write("\nTRADING METRICS:\n")
+            f.write("-"*60 + "\n")
+            for key, value in metrics['trading'].items():
+                f.write(f"{key:30s}: {value:10,.2f}\n")
+
+            f.write("\nSUMMARY:\n")
+            f.write("-"*60 + "\n")
+            for key, value in metrics['summary'].items():
+                if isinstance(value, float):
+                    f.write(f"{key:30s}: {value:10,.2f}\n")
+                else:
+                    f.write(f"{key:30s}: {value}\n")
+
+            f.write("="*60 + "\n")
+
+            # Validate metrics and write warnings
+            warnings = self._validate_metrics(metrics)
+            if warnings:
+                f.write("\n" + "!"*60 + "\n")
+                f.write("METRIC VALIDATION WARNINGS\n")
+                f.write("!"*60 + "\n")
+                for warning in warnings:
+                    f.write(f"\n{warning}\n")
+                f.write("\n" + "!"*60 + "\n")
+
+            f.write("\n")

@@ -96,8 +96,35 @@ class BacktestEngine:
         signals = signals.copy()
         signals['date'] = pd.to_datetime(signals['date'])
 
+        # Get all trading dates from prices
+        if isinstance(self.prices.index, pd.MultiIndex):
+            all_dates = sorted(self.prices.index.get_level_values(0).unique())
+        else:
+            all_dates = sorted(self.prices.index.unique())
+
+        # CRITICAL FIX: Filter signals to only include dates within price data range
+        # This prevents 0 trades when signals exist outside backtest window
+        price_start = all_dates[0]
+        price_end = all_dates[-1]
+
+        original_signal_count = len(signals)
+        signals = signals[(signals['date'] >= price_start) & (signals['date'] <= price_end)].copy()
+        filtered_count = original_signal_count - len(signals)
+
+        if filtered_count > 0:
+            print(f"\nWARNING: Filtered out {filtered_count} signals outside price data range")
+            print(f"  Price range: {price_start} to {price_end}")
+
+        if signals.empty:
+            print("ERROR: No signals within price data range. Backtest cannot proceed.")
+            return self._create_empty_result()
+
         # Get rebalancing dates
         rebalance_dates = self._get_rebalance_dates(signals, rebalance_freq)
+        print(f"\nDEBUG: Backtest setup:")
+        print(f"  Total signals/positions in portfolio: {len(signals)}")
+        print(f"  Unique rebalance dates: {len(rebalance_dates)}")
+        print(f"  Rebalance dates: {rebalance_dates[:5]}")
 
         # Initialize tracking
         cash = self.initial_capital
@@ -105,13 +132,10 @@ class BacktestEngine:
         portfolio_values = []
         returns = []
 
-        # Get all trading dates from prices
-        if isinstance(self.prices.index, pd.MultiIndex):
-            all_dates = sorted(self.prices.index.get_level_values(0).unique())
-        else:
-            all_dates = sorted(self.prices.index.unique())
+        print(f"  Price data dates: {len(all_dates)} (from {all_dates[0]} to {all_dates[-1]})")
 
         # Simulate trading
+        rebalance_count = 0
         for i, date in enumerate(all_dates):
             # Calculate current portfolio value BEFORE rebalancing
             portfolio_value_before = self._calculate_portfolio_value_correct(
@@ -120,9 +144,12 @@ class BacktestEngine:
 
             # Check if we should rebalance
             if date in rebalance_dates:
+                rebalance_count += 1
+                print(f"DEBUG: Rebalancing #{rebalance_count} on {date}")
                 current_positions, cash = self._rebalance_with_cash(
-                    date, signals, current_positions, cash, portfolio_value_before
+                    date, signals, current_positions, cash, portfolio_value_before, holding_period
                 )
+                print(f"DEBUG:   Created {len(current_positions)} positions, {len(self.trades)} total trades")
 
             # Calculate portfolio value AFTER rebalancing
             portfolio_value = self._calculate_portfolio_value_correct(
@@ -159,24 +186,41 @@ class BacktestEngine:
 
     def _rebalance_with_cash(self, date: datetime, signals: pd.DataFrame,
                              current_positions: Dict, cash: float,
-                             portfolio_value: float) -> tuple:
-        """Execute rebalancing with proper cash tracking"""
-        # First, liquidate all current positions
-        for ticker, position in current_positions.items():
-            price = self._get_price(date, ticker)
-            if price:
-                # Sell/cover position
-                proceeds = position['shares'] * price
-                # For longs: get cash back
-                # For shorts: pay cash to cover
-                cash += proceeds
-                # Apply transaction costs
-                cash -= abs(proceeds) * (self.commission_pct + self.slippage_bct)
+                             portfolio_value: float, holding_period: int = 10) -> tuple:
+        """Execute rebalancing with proper cash tracking and holding period management"""
+        # CRITICAL FIX: Only liquidate positions past their holding period
+        # This allows multiple positions to be held simultaneously (core of event-driven strategy)
+        positions_to_keep = {}
+
+        for ticker, position in list(current_positions.items()):
+            entry_date = position['entry_date']
+            days_held = (date - entry_date).days
+
+            # Check if position should be liquidated (past holding period)
+            if days_held >= holding_period:
+                price = self._get_price(date, ticker)
+                if price:
+                    # Liquidate expired position
+                    proceeds = position['shares'] * price
+                    # For longs: get cash back; For shorts: pay cash to cover
+                    cash += proceeds
+                    # Apply transaction costs
+                    cash -= abs(proceeds) * (self.commission_pct + self.slippage_bct)
+                    print(f"DEBUG:   Liquidated {ticker} after {days_held} days (holding period: {holding_period})")
+            else:
+                # Keep position (still within holding period)
+                positions_to_keep[ticker] = position
+                print(f"DEBUG:   Keeping {ticker} (held for {days_held}/{holding_period} days)")
+
+        # Start with positions we're keeping
+        current_positions = positions_to_keep
 
         # Get target weights for this date
         target_signals = signals[signals['date'] == date].copy()
 
+        print(f"DEBUG:   Found {len(target_signals)} signals for {date}")
         if target_signals.empty:
+            print(f"DEBUG:   WARNING: No signals found for {date}")
             return {}, cash
 
         # Apply risk management if enabled
@@ -211,6 +255,10 @@ class BacktestEngine:
         # Calculate target positions using portfolio value (not just cash)
         new_positions = {}
 
+        print(f"DEBUG:   Target signals after risk management:")
+        for idx, row in target_signals.iterrows():
+            print(f"DEBUG:     {row['ticker']}: weight={row['weight']:.4f}")
+
         for _, row in target_signals.iterrows():
             ticker = row['ticker']
             weight = row['weight']
@@ -218,12 +266,17 @@ class BacktestEngine:
             # Get current price
             price = self._get_price(date, ticker)
 
+            print(f"DEBUG:   Processing {ticker}: weight={weight:.4f}, price={price}, portfolio_value={portfolio_value:,.2f}")
+
             # CRITICAL FIX: Also check for NaN prices (can cause ValueError when converting to int)
             if price is None or pd.isna(price) or price <= 0:
+                print(f"DEBUG:     REJECTED - Invalid price: {price}")
                 continue
 
             # Calculate target dollar amount based on portfolio value
             target_value = portfolio_value * weight
+
+            print(f"DEBUG:     Target value: ${target_value:,.2f}")
 
             # Calculate shares (accounting for transaction costs)
             if target_value > 0:
@@ -231,11 +284,13 @@ class BacktestEngine:
                 shares = int(target_value / (price * (1 + self.commission_pct + self.slippage_bct)))
                 cost = shares * price * (1 + self.commission_pct + self.slippage_bct)
                 cash -= cost
+                print(f"DEBUG:     LONG: {shares} shares @ ${price:.2f} = ${cost:,.2f}")
             else:
                 # Short position (negative shares)
                 shares = int(target_value / (price * (1 - self.commission_pct - self.slippage_bct)))
                 proceeds = abs(shares) * price * (1 - self.commission_pct - self.slippage_bct)
                 cash += proceeds
+                print(f"DEBUG:     SHORT: {shares} shares @ ${price:.2f} = ${proceeds:,.2f}")
 
             if shares != 0:
                 new_positions[ticker] = {
@@ -252,8 +307,15 @@ class BacktestEngine:
                     'price': price,
                     'value': shares * price
                 })
+                print(f"DEBUG:     ✓ Position created")
+            else:
+                print(f"DEBUG:     REJECTED - Shares = 0")
 
-        return new_positions, cash
+        # Merge kept positions with new positions
+        current_positions.update(new_positions)
+        print(f"DEBUG:   Total positions after rebalance: {len(current_positions)} (kept: {len(positions_to_keep)}, new: {len(new_positions)})")
+
+        return current_positions, cash
 
     def _calculate_portfolio_value_correct(self, date: datetime,
                                            positions: Dict, cash: float) -> float:
@@ -319,29 +381,53 @@ class BacktestEngine:
         """Get price for ticker on date"""
         try:
             if isinstance(self.prices.index, pd.MultiIndex):
-                price_data = self.prices.xs(ticker, level='ticker')
-                if date in price_data.index:
-                    result = price_data.loc[date, price_type]
-                    # Handle case where result is a Series (multiple rows for same date)
-                    if isinstance(result, pd.Series):
-                        return float(result.iloc[0])
-                    return float(result)
+                # CRITICAL FIX: Handle hierarchical column structure from yfinance
+                # Check if columns are MultiIndex (e.g., ('Close', 'AAPL'))
+                if isinstance(self.prices.columns, pd.MultiIndex):
+                    # Access price using hierarchical column structure
+                    # Try to get exact date match first
+                    if (date, ticker) in self.prices.index:
+                        price = self.prices.loc[(date, ticker), (price_type, ticker)]
+                        if pd.notna(price):
+                            return float(price)
+
+                    # If no exact match, use forward-fill (most recent past price)
+                    ticker_mask = self.prices.index.get_level_values('ticker') == ticker
+                    ticker_data = self.prices[ticker_mask]
+                    date_mask = ticker_data.index.get_level_values('Date') <= date
+                    past_data = ticker_data[date_mask]
+
+                    if len(past_data) > 0:
+                        latest_date = past_data.index.get_level_values('Date').max()
+                        price = self.prices.loc[(latest_date, ticker), (price_type, ticker)]
+                        if pd.notna(price):
+                            return float(price)
                 else:
-                    # FIXED: Use most recent PAST price (forward-fill) to prevent look-ahead bias
-                    # Never use future prices for trading decisions
-                    past_dates = price_data.index[price_data.index <= date]
-                    if len(past_dates) > 0:
-                        nearest_date = past_dates.max()  # Most recent past date
-                        result = price_data.loc[nearest_date, price_type]
+                    # Simple column structure
+                    price_data = self.prices.xs(ticker, level='ticker')
+                    if date in price_data.index:
+                        result = price_data.loc[date, price_type]
+                        # Handle case where result is a Series (multiple rows for same date)
                         if isinstance(result, pd.Series):
                             return float(result.iloc[0])
                         return float(result)
+                    else:
+                        # FIXED: Use most recent PAST price (forward-fill) to prevent look-ahead bias
+                        # Never use future prices for trading decisions
+                        past_dates = price_data.index[price_data.index <= date]
+                        if len(past_dates) > 0:
+                            nearest_date = past_dates.max()  # Most recent past date
+                            result = price_data.loc[nearest_date, price_type]
+                            if isinstance(result, pd.Series):
+                                return float(result.iloc[0])
+                            return float(result)
             else:
                 if date in self.prices.index and ticker in self.prices.columns:
                     return float(self.prices.loc[date, ticker])
 
             return None
         except Exception as e:
+            print(f"ERROR in _get_price({date}, {ticker}): {e}")
             return None
 
     def _create_empty_result(self) -> 'BacktestResult':
@@ -401,3 +487,11 @@ class BacktestResult:
         if self.portfolio_values.empty:
             return pd.Series(dtype=float)
         return self.portfolio_values.set_index('date')['value']
+
+    def get_daily_returns(self) -> pd.Series:
+        """Get daily returns as Series
+
+        Returns:
+            pd.Series: Daily returns indexed by date
+        """
+        return self.returns_series

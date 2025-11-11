@@ -47,6 +47,7 @@ class PortfolioConstructor:
     def _quintile_portfolio(self, signals_df: pd.DataFrame) -> pd.DataFrame:
         """
         Classic quintile approach: Long Q5, Short Q1
+        CRITICAL: Weights are assigned PER DATE (not globally)
 
         Args:
             signals_df: Signals DataFrame
@@ -56,32 +57,44 @@ class PortfolioConstructor:
         """
         signals_df = signals_df.copy()
 
-        # Filter by quintiles
-        long_stocks = signals_df[signals_df['quintile'] == 5]
-        short_stocks = signals_df[signals_df['quintile'] == 1]
+        # CRITICAL FIX: Group by date and assign weights within each date
+        # Previously assigned global weights (e.g., 13 longs across all dates → 1/13 each)
+        # Now assigns weights per rebalance date (e.g., 2 longs on 2024-08-01 → 1/2 each)
+        portfolio_list = []
 
-        # Calculate equal weights
-        long_weight = 1.0 / len(long_stocks) if len(long_stocks) > 0 else 0
-        short_weight = -1.0 / len(short_stocks) if len(short_stocks) > 0 else 0
+        for date, group in signals_df.groupby('date'):
+            # Filter by quintiles for this specific date
+            long_stocks = group[group['quintile'] == 5].copy()
+            short_stocks = group[group['quintile'] == 1].copy()
 
-        # Assign weights
-        long_stocks = long_stocks.copy()
-        short_stocks = short_stocks.copy()
+            # Calculate equal weights FOR THIS DATE ONLY
+            n_long = len(long_stocks)
+            n_short = len(short_stocks)
 
-        long_stocks['weight'] = long_weight
-        short_stocks['weight'] = short_weight
+            if n_long > 0:
+                long_stocks['weight'] = 1.0 / n_long
+            if n_short > 0:
+                short_stocks['weight'] = -1.0 / n_short
 
-        # Combine
-        if self.strategy_type == 'long_short':
-            portfolio = pd.concat([long_stocks, short_stocks])
-        elif self.strategy_type == 'long_only':
-            portfolio = long_stocks
-        elif self.strategy_type == 'short_only':
-            portfolio = short_stocks
+            # Combine for this date
+            if self.strategy_type == 'long_short':
+                date_portfolio = pd.concat([long_stocks, short_stocks])
+            elif self.strategy_type == 'long_only':
+                date_portfolio = long_stocks
+            elif self.strategy_type == 'short_only':
+                date_portfolio = short_stocks
+            else:
+                date_portfolio = pd.concat([long_stocks, short_stocks])
+
+            portfolio_list.append(date_portfolio)
+
+        # Combine all dates
+        if portfolio_list:
+            portfolio = pd.concat(portfolio_list)
+            return portfolio[['ticker', 'date', 'weight']].reset_index(drop=True)
         else:
-            portfolio = pd.concat([long_stocks, short_stocks])
-
-        return portfolio[['ticker', 'date', 'weight']].reset_index(drop=True)
+            # Return empty DataFrame with correct columns (no Q1 or Q5 signals found)
+            return pd.DataFrame(columns=['ticker', 'date', 'weight'])
 
     def _z_score_portfolio(self, signals_df: pd.DataFrame) -> pd.DataFrame:
         """

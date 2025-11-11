@@ -51,11 +51,14 @@ class ESGSignalGenerator:
         # 1. Event Severity (from event detection confidence)
         event_severity = event_features.get('confidence', 0.5)
 
-        # 2. Intensity (sentiment magnitude - use absolute value for signal strength)
-        # Strong negative sentiment indicates strong market reaction (regardless of direction)
-        # The ESG event category (positive/negative) determines the trade direction
+        # 2. Intensity (sentiment magnitude with direction)
+        # CRITICAL FIX: Use SIGNED sentiment to determine quintile
+        # Positive sentiment → High quintile (Q5) → Long positions
+        # Negative sentiment → Low quintile (Q1) → Short positions
+        # This ensures sentiment-quintile alignment for long-short strategy
         intensity_raw = reaction_features.get('intensity', 0.0)
-        intensity_normalized = abs(intensity_raw)  # Use absolute value for strength
+        # Normalize to [0, 1] range: map [-1, 1] sentiment to [0, 1]
+        intensity_normalized = (intensity_raw + 1.0) / 2.0  # Maps -1→0, 0→0.5, +1→1
 
         # 3. Volume (log-normalized volume ratio)
         volume_ratio = reaction_features.get('volume_ratio', 1.0)
@@ -174,7 +177,89 @@ class ESGSignalGenerator:
             )
             signals.append(signal)
 
-        return pd.DataFrame(signals)
+        df_signals = pd.DataFrame(signals)
+
+        # CRITICAL: Validate signal quality after generation
+        self.validate_signal_quality(df_signals)
+
+        return df_signals
+
+    def validate_signal_quality(self, signals_df: pd.DataFrame):
+        """
+        Validate data quality of generated signals and print warnings
+
+        Args:
+            signals_df: DataFrame with generated signals
+        """
+        if signals_df.empty:
+            print("WARNING: No signals generated!")
+            return
+
+        print("\n" + "="*60)
+        print("SIGNAL QUALITY VALIDATION")
+        print("="*60)
+
+        # 1. Check signals per month
+        signals_df['date'] = pd.to_datetime(signals_df['date'])
+        signals_df['year_month'] = signals_df['date'].dt.to_period('M')
+        signals_per_month = signals_df.groupby('year_month').size()
+
+        print(f"\nTotal signals generated: {len(signals_df)}")
+        print(f"Date range: {signals_df['date'].min()} to {signals_df['date'].max()}")
+        print(f"\nSignals per month:")
+        for period, count in signals_per_month.items():
+            status = "LOW" if count < 10 else "OK"
+            print(f"  {period}: {count:3d} signals [{status}]")
+
+        low_months = signals_per_month[signals_per_month < 10]
+        if len(low_months) > 0:
+            print(f"\nALERT: {len(low_months)} months have < 10 signals!")
+            print(f"       This may reduce statistical significance of backtest results.")
+
+        # 2. Check Reddit coverage (non-zero sentiment)
+        total_signals = len(signals_df)
+        non_zero_sentiment = (signals_df['sentiment_intensity'] != 0.0).sum()
+        reddit_coverage = (non_zero_sentiment / total_signals) * 100
+
+        print(f"\nReddit sentiment coverage:")
+        print(f"  Signals with Reddit data: {non_zero_sentiment}/{total_signals} ({reddit_coverage:.1f}%)")
+
+        if reddit_coverage < 60:
+            print(f"\nWARNING: Reddit coverage is {reddit_coverage:.1f}% (target: >60%)")
+            print(f"         {total_signals - non_zero_sentiment} signals have zero sentiment (missing Reddit data)")
+            print(f"         Consider widening Reddit search window or adding fallback data sources")
+
+        # 3. Check sentiment-quintile alignment
+        # Expected: Q5 (highest quintile) should correlate with positive sentiment
+        # Negative correlation suggests inversion bug in scoring logic
+        correlation = signals_df[['quintile', 'sentiment_intensity']].corr().iloc[0, 1]
+
+        print(f"\nSentiment-Quintile correlation: {correlation:.3f}")
+
+        if correlation < 0:
+            print(f"\nCRITICAL: Negative correlation detected ({correlation:.3f})!")
+            print(f"          Expected: Q5 signals should have positive sentiment")
+            print(f"          Actual: Q5 signals may have negative sentiment (INVERTED)")
+            print(f"          This suggests a bug in quintile assignment logic")
+
+            # Show quintile breakdown
+            quintile_sentiment = signals_df.groupby('quintile')['sentiment_intensity'].agg(['mean', 'count'])
+            print(f"\nQuintile sentiment breakdown:")
+            print(quintile_sentiment)
+
+        # 4. Check quintile distribution
+        quintile_counts = signals_df['quintile'].value_counts().sort_index()
+        print(f"\nQuintile distribution:")
+        for q, count in quintile_counts.items():
+            pct = (count / total_signals) * 100
+            print(f"  Q{q}: {count:3d} signals ({pct:5.1f}%)")
+
+        # Expected: roughly 20% per quintile (may vary with sparse data)
+        if quintile_counts.std() > 5:
+            print(f"\nNOTE: Uneven quintile distribution (std={quintile_counts.std():.1f})")
+            print(f"      This is expected for sparse ESG events")
+
+        print("="*60 + "\n")
 
     def get_signal_statistics(self) -> Dict:
         """
