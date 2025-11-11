@@ -284,22 +284,35 @@ Default Weights:
 1. Compute raw score for each stock-event pair
 2. Calculate cross-sectional z-score (compare stocks on same date)
 3. Apply tanh transformation to map to [-1, 1]
-4. Assign quintile rank (Q1 = weakest, Q5 = strongest)
+4. Assign quintile rank (divide stocks into 5 groups):
+   - **Quintile 1 (Q1)**: Bottom 20% (weakest signals, scores 0-20th percentile)
+   - **Quintile 2 (Q2)**: 20th-40th percentile
+   - **Quintile 3 (Q3)**: 40th-60th percentile (middle)
+   - **Quintile 4 (Q4)**: 60th-80th percentile
+   - **Quintile 5 (Q5)**: Top 20% (strongest signals, scores 80-100th percentile)
 
 **Trading Signal**:
-- **Long Q5** (strongest negative sentiment on negative ESG events → underreaction)
-- **Short Q1** (strongest positive sentiment on positive ESG events → overreaction)
+- **Long Quintile 5** (top 20% strongest signals → expected to rebound/outperform)
+- **Short Quintile 1** (bottom 20% weakest signals → expected to decline/underperform)
+
+*Note: "Quintile" refers to statistical ranking (dividing into 5 groups), not fiscal quarters.*
 
 ### 6. Portfolio Construction
 
 **Long-Short Market-Neutral Strategy**
 
 ```
-Long Position:  Q5 signals (expected to rebound/outperform)
-Short Position: Q1 signals (expected to decline/underperform)
+Long Position:  Quintile 5 stocks (top 20% strongest signals → expected to outperform)
+Short Position: Quintile 1 stocks (bottom 20% weakest signals → expected to underperform)
 Net Exposure:   ~0% (market-neutral)
 Gross Exposure: 200% (100% long + 100% short)
 ```
+
+**Example**: If 10 stocks have ESG events on the same day:
+- Rank them by signal strength (1-10)
+- Top 2 stocks (scores 9-10) → **Quintile 5** → Go long
+- Bottom 2 stocks (scores 1-2) → **Quintile 1** → Go short
+- Middle 6 stocks (scores 3-8) → No position or neutral
 
 **Weighting Methods**:
 1. **Quintile**: Equal weight within long/short baskets
