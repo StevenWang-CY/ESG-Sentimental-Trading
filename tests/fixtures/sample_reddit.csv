@@ -1,0 +1,7 @@
+timestamp,ticker,text,user_followers,comments,upvotes,sentiment
+2024-01-15 10:30:00,AAPL,Apple's new board changes look promising for governance. Bullish on transparency.,150,25,342,0.65
+2024-01-15 14:20:00,AAPL,Not sure about the board shuffle. Seems like political maneuvering.,80,12,145,-0.15
+2024-02-20 09:15:00,TSLA,Tesla's carbon reduction plan is impressive! Finally taking ESG seriously.,420,78,1250,0.82
+2024-02-20 16:45:00,TSLA,TSLA to the moon with these sustainability moves!,90,34,567,0.70
+2024-03-10 11:00:00,MSFT,Microsoft diversity programs are exactly what tech needs.,200,45,890,0.58
+2024-03-10 15:30:00,MSFT,More corporate virtue signaling from MSFT. Actions speak louder.,110,18,234,-0.25

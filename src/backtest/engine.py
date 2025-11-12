@@ -180,9 +180,41 @@ class BacktestEngine:
         return result
 
     def _get_rebalance_dates(self, signals: pd.DataFrame, freq: str) -> List[datetime]:
-        """Get rebalancing dates based on frequency"""
-        signal_dates = signals['date'].unique()
-        return sorted(signal_dates)
+        """
+        Get rebalancing dates based on frequency
+
+        CRITICAL FIX: Properly implement weekly/monthly rebalancing
+        Previously this ignored freq parameter and rebalanced on every signal date,
+        causing excessive turnover (7.44x instead of expected 3-5x)
+
+        Args:
+            signals: DataFrame with 'date' column
+            freq: Rebalancing frequency ('D'=daily, 'W'=weekly, 'M'=monthly)
+
+        Returns:
+            List of rebalancing dates
+        """
+        signal_dates = pd.to_datetime(signals['date'].unique())
+
+        if freq == 'D':
+            # Daily rebalancing: use all signal dates
+            return sorted(signal_dates)
+        elif freq == 'W':
+            # Weekly rebalancing: use week-end dates (Fridays)
+            # Group signals by week and take the last date of each week
+            signal_df = pd.DataFrame({'date': signal_dates})
+            signal_df['week'] = signal_df['date'].dt.to_period('W')
+            rebalance_dates = signal_df.groupby('week')['date'].max().tolist()
+            return sorted(rebalance_dates)
+        elif freq == 'M':
+            # Monthly rebalancing: use month-end dates
+            signal_df = pd.DataFrame({'date': signal_dates})
+            signal_df['month'] = signal_df['date'].dt.to_period('M')
+            rebalance_dates = signal_df.groupby('month')['date'].max().tolist()
+            return sorted(rebalance_dates)
+        else:
+            print(f"WARNING: Unknown rebalance frequency '{freq}', defaulting to signal dates")
+            return sorted(signal_dates)
 
     def _rebalance_with_cash(self, date: datetime, signals: pd.DataFrame,
                              current_positions: Dict, cash: float,

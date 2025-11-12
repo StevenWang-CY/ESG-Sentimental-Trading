@@ -1,0 +1,8 @@
+ticker,date,filing_type,category,confidence,keywords_matched,text_excerpt
+AAPL,2024-01-15,8-K,Governance,0.35,"board,directors,election","Apple Inc. announced changes to its board of directors..."
+TSLA,2024-02-20,8-K,Environmental,0.42,"emissions,carbon,sustainability","Tesla reports significant progress on carbon reduction initiatives..."
+MSFT,2024-03-10,8-K,Social,0.28,"diversity,inclusion,workplace","Microsoft expands diversity and inclusion programs..."
+GOOGL,2024-04-05,8-K,Governance,0.31,"ethics,compliance,investigation","Alphabet addresses compliance investigation findings..."
+AMZN,2024-05-12,8-K,Social,0.38,"labor,workers,safety","Amazon implements enhanced worker safety protocols..."
+META,2024-06-18,8-K,Governance,0.45,"privacy,data,breach","Meta faces data privacy regulatory review..."
+NVDA,2024-07-22,8-K,Environmental,0.33,"energy,renewable,climate","NVIDIA commits to renewable energy transition..."

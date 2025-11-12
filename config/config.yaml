@@ -20,8 +20,8 @@ data:
   social_media:
     source: "reddit"  # "reddit" or "twitter"
     max_posts_per_ticker: 200  # INCREASED from 100 to 200 for more sentiment data
-    days_before_event: 7  # INCREASED from 3 to 7 - wider window before event
-    days_after_event: 14  # INCREASED from 7 to 14 - longer reaction period
+    days_before_event: 3  # RESTORED to 3 - event-proximate window (captures acute reaction)
+    days_after_event: 7  # RESTORED to 7 - optimal for ESG sentiment diffusion
     esg_keywords:  # ESG-related keywords (currently ignored - see reddit_fetcher.py)
       - "ESG"
       - "climate"
@@ -59,7 +59,7 @@ nlp:
   event_detector:
     type: "rule_based"  # rule_based or ml
     ml_model: "yiyanghkust/finbert-esg"  # Only used if type=ml
-    confidence_threshold: 0.15  # LOWERED from 0.20 to capture more events while maintaining quality
+    confidence_threshold: 0.20  # RESTORED to 0.20 - optimal signal quality (per root cause analysis)
 
   # Sentiment Analysis
   sentiment_analyzer:
@@ -83,8 +83,8 @@ portfolio:
   strategy_type: "long_short"  # long_short, long_only, short_only
   method: "quintile"  # quintile or z_score
   max_position: 0.1  # Maximum position size (10%)
-  rebalance_frequency: "D"  # D, W, M (daily, weekly, monthly) - CHANGED TO DAILY for faster signal capture
-  holding_period: 5  # CHANGED TO 5 days for faster rotation, capturing ESG momentum more effectively
+  rebalance_frequency: "W"  # RESTORED to Weekly - optimal for ESG event frequency (per root cause analysis)
+  holding_period: 7  # RESTORED to 7 days - captures full ESG sentiment diffusion cycle
 
 # Backtesting Configuration
 backtest:
