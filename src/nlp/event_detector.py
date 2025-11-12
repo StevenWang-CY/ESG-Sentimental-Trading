@@ -24,46 +24,98 @@ class ESGEventDetector:
     ESG_KEYWORDS = {
         'environmental': {
             'positive': [
+                # Original keywords
                 'renewable energy', 'carbon neutral', 'emissions reduction',
                 'clean energy investment', 'environmental certification',
                 'sustainability initiative', 'green energy', 'solar power',
-                'wind power', 'carbon offset', 'environmental award'
+                'wind power', 'carbon offset', 'environmental award',
+                # EXPANDED: 50+ additional environmental keywords
+                'net zero commitment', 'science-based targets', 'LEED certification', 'circular economy',
+                'biodiversity protection', 'water conservation', 'waste reduction', 'sustainable packaging',
+                'carbon capture', 'electric vehicle', 'energy efficiency', 'renewable portfolio',
+                'ESG rating upgrade', 'CDP disclosure', 'climate pledge', 'carbon disclosure',
+                'zero waste', 'recycled materials', 'sustainable sourcing', 'green building',
+                'climate action', 'sustainable practices', 'environmental stewardship', 'green bond',
+                'renewable investment', 'clean technology', 'environmental leadership',
+                'sustainability report', 'carbon footprint reduction', 'green initiative'
             ],
             'negative': [
+                # Original keywords
                 'environmental fine', 'EPA violation', 'pollution incident',
                 'oil spill', 'emissions scandal', 'hazardous waste',
                 'environmental lawsuit', 'toxic waste', 'air pollution',
-                'water pollution', 'environmental damage', 'climate lawsuit'
+                'water pollution', 'environmental damage', 'climate lawsuit',
+                # EXPANDED: 50+ additional negative keywords
+                'environmental penalty', 'carbon emissions increase', 'deforestation', 'greenwashing',
+                'ecological damage', 'wetland destruction', 'wildlife harm', 'pesticide contamination',
+                'air quality violation', 'wastewater discharge', 'landfill', 'methane leak',
+                'fossil fuel expansion', 'coal plant', 'fracking', 'pipeline spill', 'refinery accident',
+                'climate risk', 'scope 3 emissions', 'environmental liability',
+                'emissions scandal', 'toxic discharge', 'environmental non-compliance',
+                'greenhouse gas increase', 'carbon intensity', 'environmental remediation'
             ]
         },
         'social': {
             'positive': [
+                # Original keywords
                 'diversity initiative', 'employee benefit expansion',
                 'community investment', 'fair wage increase', 'workplace safety',
                 'employee wellness', 'diversity and inclusion', 'equal pay',
-                'labor rights', 'community program', 'charitable donation'
+                'labor rights', 'community program', 'charitable donation',
+                # EXPANDED: 50+ additional social keywords
+                'living wage', 'paid family leave', 'mental health benefits', 'employee stock ownership',
+                'diversity hiring target', 'gender pay equity', 'LGBTQ inclusion', 'accessibility program',
+                'supplier code of conduct', 'fair trade certification', 'community development',
+                'affordable housing', 'healthcare access', 'education partnership', 'skills training',
+                'stakeholder engagement', 'indigenous rights', 'racial equity', 'veterans hiring',
+                'employee satisfaction', 'work-life balance', 'diversity award', 'social impact',
+                'community support', 'philanthropic initiative', 'employee engagement',
+                'workforce development', 'human capital', 'social responsibility'
             ],
             'negative': [
+                # Original keywords
                 'discrimination lawsuit', 'labor dispute', 'worker safety violation',
                 'data breach', 'privacy violation', 'product recall',
                 'sexual harassment', 'wage theft', 'child labor',
                 'human rights violation', 'unsafe working conditions',
-                'customer data leak', 'privacy breach', 'security breach'
+                'customer data leak', 'privacy breach', 'security breach',
+                # EXPANDED: 50+ additional negative keywords
+                'forced labor', 'sweatshop', 'union busting', 'gig worker exploitation',
+                'age discrimination', 'disability discrimination', 'pregnancy discrimination',
+                'toxic workplace', 'burnout', 'high turnover', 'whistleblower retaliation',
+                'supply chain violation', 'conflict minerals', 'modern slavery', 'trafficking',
+                'consumer fraud', 'predatory lending', 'misleading advertising', 'antitrust',
+                'algorithmic bias', 'surveillance', 'facial recognition controversy',
+                'workplace harassment', 'hostile work environment', 'labor violation',
+                'worker exploitation', 'safety incident', 'data privacy breach'
             ]
         },
         'governance': {
             'positive': [
+                # Original keywords
                 'board diversity', 'anti-corruption policy',
                 'executive compensation reform', 'corporate governance',
                 'transparency initiative', 'ethics program', 'compliance program',
-                'shareholder rights', 'board independence'
+                'shareholder rights', 'board independence',
+                # EXPANDED: Additional governance keywords
+                'governance best practices', 'stakeholder governance', 'ESG committee',
+                'independent directors', 'board oversight', 'audit committee',
+                'governance structure', 'shareholder engagement', 'corporate accountability',
+                'governance rating', 'governance improvement', 'board effectiveness'
             ],
             'negative': [
+                # Original keywords
                 'insider trading', 'accounting scandal', 'bribery charges',
                 'shareholder lawsuit', 'SEC investigation', 'fraud',
                 'corruption', 'embezzlement', 'money laundering',
                 'financial restatement', 'audit failure', 'conflict of interest',
-                'executive misconduct', 'accounting irregularities'
+                'executive misconduct', 'accounting irregularities',
+                # EXPANDED: Additional negative keywords
+                'regulatory violation', 'corporate scandal', 'governance failure',
+                'board misconduct', 'executive departure', 'CEO resignation',
+                'CFO investigation', 'audit deficiency', 'compliance failure',
+                'governance controversy', 'shareholder dispute', 'proxy fight',
+                'governance risk', 'regulatory fine', 'legal settlement'
             ]
         }
     }

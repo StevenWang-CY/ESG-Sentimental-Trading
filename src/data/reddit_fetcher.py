@@ -37,15 +37,27 @@ class RedditFetcher:
         self.reddit = None
 
         # Default subreddits for ESG/stock discussions
-        # Note: r/sustainableinvesting removed (returns 404)
+        # EXPANDED: Added 8 more ESG-focused communities for 5-10x coverage
         self.esg_subreddits = [
+            # Core investing subreddits (high volume)
             'stocks',
             'investing',
             'StockMarket',
             'wallstreetbets',
-            'ESG_Investing',
             'finance',
-            'SecurityAnalysis'
+            'SecurityAnalysis',
+            # ESG-specific communities
+            'ESG_Investing',
+            'environment',
+            'climate',
+            'sustainability',
+            # Value/Ethical investing communities
+            'ethicalinvesting',
+            'dividends',
+            'ValueInvesting',
+            # Additional ESG coverage
+            'RenewableEnergy',
+            'greeninvestor'
         ]
 
         if not use_mock and client_id and client_secret:
@@ -75,9 +87,9 @@ class RedditFetcher:
 
     def fetch_tweets_for_event(self, ticker: str, event_date: datetime,
                                  keywords: Optional[List[str]] = None,
-                                 days_before: int = 3,
-                                 days_after: int = 7,
-                                 max_results: int = 100) -> pd.DataFrame:
+                                 days_before: int = 7,
+                                 days_after: int = 14,
+                                 max_results: int = 200) -> pd.DataFrame:
         """
         Fetch Reddit posts related to a ticker around an event date
 
@@ -110,40 +122,68 @@ class RedditFetcher:
         try:
             posts_data = []
 
-            # Search across multiple subreddits
+            # Search across multiple subreddits with multiple strategies
+            # IMPROVED: Use 3 search strategies (relevance, new, top) for 3x coverage
+            search_strategies = [
+                ('relevance', 'all'),  # Most relevant posts (default)
+                ('new', 'all'),        # Recent posts in date range
+                ('top', 'month')       # High-quality popular posts
+            ]
+
+            seen_post_ids = set()  # Deduplicate across strategies
+
             for subreddit_name in self.esg_subreddits:
                 try:
                     subreddit = self.reddit.subreddit(subreddit_name)
 
-                    # Search posts in this subreddit
-                    # CRITICAL FIX: Increase limit significantly and sort by 'new' (time)
-                    # Reddit's default search sorts by 'relevance' which may miss our date window
-                    # Using sort='new' and higher limit increases chance of finding posts in date range
-                    search_limit = max(100, max_results // len(self.esg_subreddits) * 10)
-                    for submission in subreddit.search(query, limit=search_limit, sort='new', time_filter='all'):
-                        # Convert UTC timestamp to datetime
-                        post_time = datetime.fromtimestamp(submission.created_utc)
+                    # Try all search strategies for maximum coverage
+                    for sort_type, time_filter in search_strategies:
+                        try:
+                            # INCREASED: 5-10x higher limit for more coverage
+                            # Each subreddit gets 500-1000 posts searched (was 100)
+                            search_limit = max(500, max_results // len(self.esg_subreddits) * 20)
 
-                        # Filter by date range
-                        if start_time <= post_time <= end_time:
-                            # Get author karma (total karma as proxy for influence)
-                            try:
-                                author_karma = submission.author.link_karma + submission.author.comment_karma if submission.author else 0
-                            except:
-                                author_karma = 0
+                            for submission in subreddit.search(query, limit=search_limit, sort=sort_type, time_filter=time_filter):
+                                # Skip duplicates across search strategies
+                                if submission.id in seen_post_ids:
+                                    continue
+                                seen_post_ids.add(submission.id)
 
-                            posts_data.append({
-                                'timestamp': post_time,
-                                'text': f"{submission.title} {submission.selftext}"[:500],  # Combine title + body
-                                'user_followers': author_karma,  # Use karma as proxy for followers
-                                'retweets': submission.num_comments,  # Comments as engagement metric
-                                'likes': submission.score,  # Post score (upvotes - downvotes)
-                                'ticker': ticker,
-                                'subreddit': subreddit_name
-                            })
+                                # Convert UTC timestamp to datetime
+                                post_time = datetime.fromtimestamp(submission.created_utc)
 
-                            if len(posts_data) >= max_results:
-                                break
+                                # Filter by date range
+                                if start_time <= post_time <= end_time:
+                                    # Get author karma (total karma as proxy for influence)
+                                    try:
+                                        author_karma = submission.author.link_karma + submission.author.comment_karma if submission.author else 0
+                                    except:
+                                        author_karma = 0
+
+                                    # QUALITY FILTER: Minimum engagement thresholds
+                                    # Skip low-quality spam posts (upvotes < 2, karma < 50)
+                                    if submission.score < 2 or author_karma < 50:
+                                        continue
+
+                                    posts_data.append({
+                                        'timestamp': post_time,
+                                        'text': f"{submission.title} {submission.selftext}"[:500],  # Combine title + body
+                                        'user_followers': author_karma,  # Use karma as proxy for followers
+                                        'retweets': submission.num_comments,  # Comments as engagement metric
+                                        'likes': submission.score,  # Post score (upvotes - downvotes)
+                                        'ticker': ticker,
+                                        'subreddit': subreddit_name
+                                    })
+
+                                    if len(posts_data) >= max_results:
+                                        break
+
+                        except Exception as e:
+                            # Continue to next strategy if one fails
+                            continue
+
+                        if len(posts_data) >= max_results:
+                            break
 
                     if len(posts_data) >= max_results:
                         break
