@@ -29,10 +29,10 @@ class RiskManager:
     def __init__(self,
                  max_position_size: float = 0.05,      # 5% max per position
                  max_sector_exposure: float = 0.30,     # 30% max per sector
-                 target_volatility: float = 0.10,       # 10% annual target vol
+                 target_volatility: float = 0.18,       # FIX 4.1: 18% for event-driven (was 10%)
                  max_drawdown_threshold: float = 0.15,  # 15% max drawdown trigger
                  stop_loss_pct: float = 0.10,           # 10% stop loss per position
-                 min_positions: int = 10,                # Minimum diversification
+                 min_positions: int = 5,                 # FIX 4.1: 5 for sparse ESG events (was 10)
                  leverage_limit: float = 1.5):          # Max 1.5x leverage
         """
         Initialize risk manager
@@ -154,8 +154,9 @@ class RiskManager:
         # Scale positions to target volatility
         vol_scalar = self.target_volatility / realized_vol
 
-        # Cap scalar to prevent excessive leverage or deleverage
-        vol_scalar = np.clip(vol_scalar, 0.5, 2.0)
+        # FIX 4.1: Widen range for event-driven strategies [0.3, 3.0] (was [0.5, 2.0])
+        # Event-driven strategies need more flexibility due to sparse signal volatility
+        vol_scalar = np.clip(vol_scalar, 0.3, 3.0)
 
         portfolio = portfolio.copy()
         portfolio['weight'] *= vol_scalar

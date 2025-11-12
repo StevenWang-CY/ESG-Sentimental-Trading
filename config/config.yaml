@@ -59,7 +59,7 @@ nlp:
   event_detector:
     type: "rule_based"  # rule_based or ml
     ml_model: "yiyanghkust/finbert-esg"  # Only used if type=ml
-    confidence_threshold: 0.3
+    confidence_threshold: 0.20
 
   # Sentiment Analysis
   sentiment_analyzer:
@@ -84,7 +84,7 @@ portfolio:
   method: "quintile"  # quintile or z_score
   max_position: 0.1  # Maximum position size (10%)
   rebalance_frequency: "W"  # D, W, M (daily, weekly, monthly)
-  holding_period: 10  # Days
+  holding_period: 7  # FIX 6.1: 7 days optimal for ESG momentum (was 10, captured mean reversion)
 
 # Backtesting Configuration
 backtest:

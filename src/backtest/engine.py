@@ -261,6 +261,13 @@ class BacktestEngine:
 
         for _, row in target_signals.iterrows():
             ticker = row['ticker']
+
+            # FIX 5.1: Prevent duplicate positions for the same ticker
+            # If ticker already has an active position (within holding period), skip it
+            if ticker in current_positions:
+                print(f"DEBUG:     SKIPPED - {ticker} already has an active position")
+                continue
+
             weight = row['weight']
 
             # Get current price

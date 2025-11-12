@@ -91,6 +91,29 @@ class SECDownloader:
                                 # Accession format: 0001140361-24-038601 (year is in middle segment)
                                 filing_date = self._extract_filing_date(file_path, filing_folder.name)
 
+                                # FIX 1.1: Strict date filtering to prevent wrong-dated data
+                                # Filter out filings outside [start_date, end_date] window
+                                if start_date or end_date:
+                                    try:
+                                        filing_dt = datetime.strptime(filing_date, '%Y-%m-%d')
+
+                                        # Check if filing is before start date
+                                        if start_date:
+                                            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                                            if filing_dt < start_dt:
+                                                print(f"  ↳ Filtered: {ticker} filing from {filing_date} (before {start_date})")
+                                                continue
+
+                                        # Check if filing is after end date
+                                        if end_date:
+                                            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                                            if filing_dt > end_dt:
+                                                print(f"  ↳ Filtered: {ticker} filing from {filing_date} (after {end_date})")
+                                                continue
+                                    except ValueError as e:
+                                        print(f"  ⚠ Warning: Invalid date format for {ticker} filing: {filing_date}")
+                                        continue
+
                                 filings_metadata.append({
                                     'ticker': ticker,
                                     'filing_type': filing_type,

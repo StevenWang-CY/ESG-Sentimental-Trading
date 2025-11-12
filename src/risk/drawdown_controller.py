@@ -33,12 +33,15 @@ class DrawdownController:
         """
         # Default thresholds if not provided
         if drawdown_thresholds is None:
-            self.drawdown_thresholds = [-0.05, -0.10, -0.15, -0.20]  # 5%, 10%, 15%, 20%
+            # FIX 4.2: Relax thresholds for event-driven strategies (was [-0.05, -0.10, -0.15, -0.20])
+            # Event-driven strategies naturally have higher drawdowns during sparse signal periods
+            self.drawdown_thresholds = [-0.10, -0.15, -0.20, -0.25]  # 10%, 15%, 20%, 25%
         else:
             self.drawdown_thresholds = sorted(drawdown_thresholds)  # Ensure sorted
 
         if exposure_levels is None:
-            self.exposure_levels = [0.9, 0.75, 0.6, 0.5]  # Scale down exposure
+            # FIX 4.2: Less aggressive scaling (was [0.9, 0.75, 0.6, 0.5])
+            self.exposure_levels = [0.95, 0.85, 0.70, 0.50]  # Scale down exposure
         else:
             self.exposure_levels = exposure_levels
 
@@ -80,12 +83,12 @@ class DrawdownController:
         """
         Determine exposure scalar based on current drawdown
 
-        Uses piecewise linear function:
-        - 0 to -5% DD: 100% exposure
-        - -5% to -10% DD: 90% exposure
-        - -10% to -15% DD: 75% exposure
-        - -15% to -20% DD: 60% exposure
-        - > -20% DD: 50% exposure (emergency brake)
+        Uses piecewise linear function (FIX 4.2: relaxed for event-driven):
+        - 0 to -10% DD: 100% exposure (was -5%)
+        - -10% to -15% DD: 95% exposure (was 90%)
+        - -15% to -20% DD: 85% exposure (was 75%)
+        - -20% to -25% DD: 70% exposure (was 60%)
+        - > -25% DD: 50% exposure (emergency brake, was > -20%)
         """
         # No drawdown or positive return
         if drawdown >= 0:

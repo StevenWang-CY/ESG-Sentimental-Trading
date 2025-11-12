@@ -156,6 +156,110 @@ class ESGSignalGenerator:
 
         return 5
 
+    def _apply_cross_sectional_ranking(self, signals_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        FIX 2.1: Apply cross-sectional ranking to assign quintiles
+
+        Groups signals by date and ranks within each date.
+        For sparse data (<5 signals per date), uses tertile split:
+        - Top 1/3 → Q5 (long positions)
+        - Bottom 1/3 → Q1 (short positions)
+        - Middle 1/3 → Q3 (neutral)
+
+        Args:
+            signals_df: DataFrame with raw signals
+
+        Returns:
+            DataFrame with corrected quintile assignments
+        """
+        if signals_df.empty:
+            return signals_df
+
+        # Ensure date is datetime
+        signals_df['date'] = pd.to_datetime(signals_df['date'])
+
+        def assign_quintiles_per_date(group):
+            """Assign quintiles within a single date"""
+            n_signals = len(group)
+
+            if n_signals >= 5:
+                # Standard quintile split (20% per quintile)
+                try:
+                    group['quintile'] = pd.qcut(
+                        group['raw_score'],
+                        q=5,
+                        labels=[1, 2, 3, 4, 5],
+                        duplicates='drop'
+                    )
+                except ValueError:
+                    # Handle case where all scores are identical
+                    group['quintile'] = 3
+            else:
+                # Tertile split for sparse data
+                # Top 1/3 → Q5, Bottom 1/3 → Q1, Middle → Q3
+                scores = group['raw_score'].values
+
+                if n_signals == 1:
+                    # Single signal → use sentiment to determine quintile
+                    sentiment = group['sentiment_intensity'].iloc[0]
+                    if sentiment > 0.1:
+                        group['quintile'] = 5  # Long
+                    elif sentiment < -0.1:
+                        group['quintile'] = 1  # Short
+                    else:
+                        group['quintile'] = 3  # Neutral
+                elif n_signals == 2:
+                    # Two signals → one long, one short
+                    group['quintile'] = group['raw_score'].rank(method='first').map({1: 1, 2: 5})
+                else:
+                    # 3-4 signals → tertile split
+                    percentile_33 = np.percentile(scores, 33.33)
+                    percentile_67 = np.percentile(scores, 66.67)
+
+                    def assign_tertile(score):
+                        if score <= percentile_33:
+                            return 1  # Bottom tertile → Q1 (short)
+                        elif score >= percentile_67:
+                            return 5  # Top tertile → Q5 (long)
+                        else:
+                            return 3  # Middle tertile → Q3 (neutral)
+
+                    group['quintile'] = group['raw_score'].apply(assign_tertile)
+
+            return group
+
+        # Apply cross-sectional ranking per date
+        signals_df = signals_df.groupby('date', group_keys=False).apply(assign_quintiles_per_date)
+
+        # Recompute z-scores using same-date normalization (proper cross-sectional)
+        def recompute_z_scores(group):
+            """Recompute z-scores within each date"""
+            if len(group) > 1:
+                mean_score = group['raw_score'].mean()
+                std_score = group['raw_score'].std()
+                group['z_score'] = (group['raw_score'] - mean_score) / (std_score + 1e-6)
+                group['signal'] = np.tanh(group['z_score'])
+            else:
+                # Single signal → use sentiment direction
+                sentiment = group['sentiment_intensity'].iloc[0]
+                group['z_score'] = np.sign(sentiment) * 1.0
+                group['signal'] = np.tanh(group['z_score'])
+            return group
+
+        signals_df = signals_df.groupby('date', group_keys=False).apply(recompute_z_scores)
+
+        print(f"\n✓ Cross-sectional ranking applied:")
+        print(f"  Dates with signals: {signals_df['date'].nunique()}")
+        print(f"  Avg signals per date: {len(signals_df) / signals_df['date'].nunique():.1f}")
+
+        # Show quintile distribution after cross-sectional ranking
+        quintile_dist = signals_df['quintile'].value_counts().sort_index()
+        print(f"  Quintile distribution after cross-sectional ranking:")
+        for q, count in quintile_dist.items():
+            print(f"    Q{q}: {count} signals")
+
+        return signals_df
+
     def generate_signals_batch(self, events_data: List[Dict]) -> pd.DataFrame:
         """
         Generate signals for multiple events
@@ -178,6 +282,10 @@ class ESGSignalGenerator:
             signals.append(signal)
 
         df_signals = pd.DataFrame(signals)
+
+        # FIX 2.1: Apply cross-sectional ranking AFTER all signals are generated
+        # This ensures proper quintile assignment for market-neutral portfolios
+        df_signals = self._apply_cross_sectional_ranking(df_signals)
 
         # CRITICAL: Validate signal quality after generation
         self.validate_signal_quality(df_signals)

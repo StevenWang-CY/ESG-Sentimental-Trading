@@ -301,6 +301,45 @@ def main():
 
     events_data = []
 
+    # FIX 1.2: Defensive date filtering (second layer of defense)
+    # Filter out any filings that somehow got through with wrong dates
+    original_count = len(all_filings)
+    start_dt = datetime.strptime(args.start_date, '%Y-%m-%d')
+    end_dt = datetime.strptime(args.end_date, '%Y-%m-%d')
+
+    valid_filings = []
+    filtered_out = []
+
+    for filing in all_filings:
+        try:
+            filing_date = datetime.strptime(filing.get('date', args.start_date), '%Y-%m-%d')
+
+            if start_dt <= filing_date <= end_dt:
+                valid_filings.append(filing)
+            else:
+                filtered_out.append((filing['ticker'], filing.get('date', 'UNKNOWN')))
+        except ValueError as e:
+            logger.warning(f"⚠ Invalid date format in filing: {filing.get('date')}")
+            filtered_out.append((filing['ticker'], filing.get('date', 'INVALID')))
+
+    # Log filtering statistics
+    filtered_count = len(filtered_out)
+    if filtered_count > 0:
+        logger.warning(f"⚠ Filtered {filtered_count}/{original_count} filings outside date range:")
+        for ticker, date in filtered_out[:5]:  # Show first 5
+            logger.warning(f"  - {ticker}: {date}")
+        if filtered_count > 5:
+            logger.warning(f"  ... and {filtered_count - 5} more")
+
+        # Alert if >10% filtered (indicates upstream bug)
+        if filtered_count / original_count > 0.10:
+            logger.error(f"⚠⚠⚠ WARNING: {filtered_count/original_count*100:.1f}% of filings were outside date range!")
+            logger.error(f"    This suggests the SEC downloader may not be filtering correctly.")
+            logger.error(f"    Expected: {args.start_date} to {args.end_date}")
+
+    all_filings = valid_filings  # Replace with filtered list
+    logger.info(f"Valid filings for event detection: {len(all_filings)}")
+
     for i, filing in enumerate(all_filings):
         logger.info(f"Processing filing {i+1}/{len(all_filings)}: {filing['ticker']}...")
 
@@ -374,18 +413,12 @@ def main():
     logger.info("\n>>> STEP 6: SIGNAL GENERATION")
 
     signal_generator = ESGSignalGenerator()
-    signals_list = []
 
-    for event_data in events_data:
-        signal = signal_generator.compute_signal(
-            ticker=event_data['ticker'],
-            date=event_data['date'],
-            event_features=event_data['event_features'],
-            reaction_features=event_data['reaction_features']
-        )
-        signals_list.append(signal)
+    # FIX 2.2: Use batch processing to apply cross-sectional ranking
+    # Previously called compute_signal() individually, which assigned Q3 to all sparse signals
+    # Now use generate_signals_batch() which applies cross-sectional ranking
+    signals_df = signal_generator.generate_signals_batch(events_data)
 
-    signals_df = pd.DataFrame(signals_list)
     logger.info(f"Generated {len(signals_df)} trading signals")
     logger.info(f"Quintile distribution: {signals_df['quintile'].value_counts().sort_index().to_dict()}")
 
@@ -458,9 +491,9 @@ def main():
 
     try:
         factor_analyzer = FactorAnalysis()
+        factor_analyzer.load_factors(factors)  # Load factors first
         factor_results = factor_analyzer.run_regression(
-            returns=results.get_daily_returns(),
-            factors=factors
+            results.get_daily_returns()  # Pass returns as positional argument
         )
 
         logger.info("\n" + "="*60)
