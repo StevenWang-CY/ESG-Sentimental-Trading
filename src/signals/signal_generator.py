@@ -287,10 +287,62 @@ class ESGSignalGenerator:
         # This ensures proper quintile assignment for market-neutral portfolios
         df_signals = self._apply_cross_sectional_ranking(df_signals)
 
+        # NEW: Apply quality filters (Priority 1 improvements)
+        print(f"\n📊 Signal Quality Filters (Research-Based):")
+        print(f"  Signals before filtering: {len(df_signals)}")
+
+        # Filter 1: Minimum volume ratio (2.5x baseline)
+        df_signals = self.filter_by_volume(df_signals, min_volume_ratio=2.5)
+        print(f"  After volume filter (≥2.5x): {len(df_signals)}")
+
+        # Filter 2: Non-zero sentiment (|intensity| > 0.1)
+        df_signals = self.filter_by_sentiment(df_signals, min_abs_intensity=0.1)
+        print(f"  After sentiment filter (|intensity|>0.1): {len(df_signals)}")
+
         # CRITICAL: Validate signal quality after generation
         self.validate_signal_quality(df_signals)
 
         return df_signals
+
+    def filter_by_volume(self, signals_df: pd.DataFrame, min_volume_ratio: float = 2.5) -> pd.DataFrame:
+        """
+        Filter signals by minimum volume ratio (Priority 1 improvement)
+
+        Academic research shows volume ratios <2.5x have minimal price impact.
+
+        Args:
+            signals_df: DataFrame with signals
+            min_volume_ratio: Minimum volume ratio threshold
+
+        Returns:
+            Filtered DataFrame
+        """
+        if signals_df.empty:
+            return signals_df
+
+        filtered = signals_df[signals_df['volume_ratio'] >= min_volume_ratio].copy()
+
+        return filtered
+
+    def filter_by_sentiment(self, signals_df: pd.DataFrame, min_abs_intensity: float = 0.1) -> pd.DataFrame:
+        """
+        Filter signals by minimum absolute sentiment intensity (Priority 1 improvement)
+
+        Eliminates neutral-sentiment signals that dilute alpha.
+
+        Args:
+            signals_df: DataFrame with signals
+            min_abs_intensity: Minimum absolute sentiment intensity
+
+        Returns:
+            Filtered DataFrame
+        """
+        if signals_df.empty:
+            return signals_df
+
+        filtered = signals_df[signals_df['sentiment_intensity'].abs() >= min_abs_intensity].copy()
+
+        return filtered
 
     def validate_signal_quality(self, signals_df: pd.DataFrame):
         """

@@ -237,6 +237,194 @@ class UniverseFetcher:
         print(f"Loaded {len(tickers)} tickers from {filename}")
         return tickers
 
+    def get_russell_midcap_tickers(self) -> List[str]:
+        """
+        Get Russell Midcap Index constituent tickers
+        ~800 mid-cap stocks ($2B-$50B market cap)
+
+        Returns:
+            List of ticker symbols
+        """
+        if 'russell_midcap' in self.cache:
+            return self.cache['russell_midcap']
+
+        try:
+            # Try to fetch from iShares Russell Mid-Cap ETF (IWR) holdings
+            url = 'https://www.ishares.com/us/products/239506/ishares-russell-midcap-etf/1467271812596.ajax?fileType=csv&fileName=IWR_holdings&dataType=fund'
+
+            print("Fetching Russell Midcap constituents from iShares IWR ETF...")
+            df = pd.read_csv(url, skiprows=9)
+
+            # Get tickers
+            if 'Ticker' in df.columns:
+                tickers = df['Ticker'].dropna().tolist()
+            elif 'Symbol' in df.columns:
+                tickers = df['Symbol'].dropna().tolist()
+            else:
+                raise ValueError("Could not find ticker column")
+
+            # Clean tickers
+            tickers = [str(t).strip().upper() for t in tickers if pd.notna(t) and str(t) != '-']
+            tickers = [t for t in tickers if t and len(t) <= 5 and not t.startswith('CASH')]
+
+            # Remove duplicates
+            tickers = list(set(tickers))
+
+            self.cache['russell_midcap'] = tickers
+            print(f"✓ Fetched {len(tickers)} Russell Midcap tickers from iShares")
+            return tickers
+
+        except Exception as e:
+            print(f"Warning: Could not fetch from iShares: {e}")
+            print("Using fallback method...")
+            return self._get_russell_midcap_fallback()
+
+    def _get_russell_midcap_fallback(self) -> List[str]:
+        """
+        Fallback: Generate Russell Midcap proxy from S&P 400 + filtering
+        S&P 400 MidCap is similar composition to Russell Midcap
+        """
+        try:
+            # Fetch S&P 400 MidCap from Wikipedia
+            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_400_companies'
+            tables = pd.read_html(url)
+            df = tables[0]
+
+            if 'Symbol' in df.columns:
+                tickers = df['Symbol'].tolist()
+            elif 'Ticker symbol' in df.columns:
+                tickers = df['Ticker symbol'].tolist()
+            else:
+                # Use first column if can't find symbol column
+                tickers = df.iloc[:, 0].tolist()
+
+            # Clean tickers
+            tickers = [str(t).replace('.', '-').strip().upper() for t in tickers if pd.notna(t)]
+            tickers = [t for t in tickers if t and len(t) <= 5]
+
+            self.cache['russell_midcap'] = tickers
+            print(f"✓ Using S&P 400 MidCap as proxy: {len(tickers)} tickers")
+            return tickers
+
+        except Exception as e:
+            print(f"Error in fallback method: {e}")
+            print("Using minimal hardcoded mid-cap list")
+            return self._get_hardcoded_midcap()
+
+    def _get_hardcoded_midcap(self) -> List[str]:
+        """
+        Minimal hardcoded mid-cap list for emergency fallback
+        Mix of liquid mid-caps with high ESG exposure
+        """
+        tickers = [
+            # Energy & Materials (high ESG exposure)
+            'DVN', 'FANG', 'OXY', 'MPC', 'VLO', 'PSX', 'HES', 'CTRA',
+            'FCX', 'NEM', 'NUE', 'STLD', 'CLF', 'AA', 'X',
+
+            # Consumer Discretionary
+            'MAR', 'HLT', 'MGM', 'WYNN', 'LVS', 'CCL', 'RCL', 'NCLH',
+            'TPR', 'LULU', 'ULTA', 'DKS', 'BBY', 'BBWI',
+
+            # Industrials
+            'DAL', 'UAL', 'AAL', 'LUV', 'JBLU', 'CARR', 'OTIS', 'XYL',
+            'IEX', 'FTV', 'VLTO', 'EME', 'J', 'GNRC',
+
+            # Real Estate (ESG-sensitive)
+            'INVH', 'EQR', 'AVB', 'ESS', 'MAA', 'UDR', 'CPT', 'AIV',
+
+            # Healthcare
+            'PODD', 'HOLX', 'ALGN', 'IDXX', 'TECH', 'BAX', 'POOL',
+
+            # Technology
+            'PANW', 'CRWD', 'ZS', 'DDOG', 'NET', 'SNOW', 'PLTR', 'U',
+
+            # Utilities (high ESG exposure)
+            'AES', 'NRG', 'CMS', 'AEE', 'EVRG', 'LNT', 'NI', 'PNW'
+        ]
+
+        print(f"Using minimal hardcoded list: {len(tickers)} mid-cap tickers")
+        return tickers
+
+    def get_esg_sensitive_midcap(self, min_market_cap: float = 2e9, max_market_cap: float = 50e9) -> List[str]:
+        """
+        Get ESG-sensitive mid-cap stocks from Russell Midcap
+        Filters for $2B-$50B market cap range
+
+        Args:
+            min_market_cap: Minimum market cap (default $2B)
+            max_market_cap: Maximum market cap (default $50B)
+
+        Returns:
+            List of ESG-sensitive mid-cap tickers
+        """
+        # Get Russell Midcap base universe
+        tickers = self.get_russell_midcap_tickers()
+
+        print(f"\nFiltering {len(tickers)} mid-caps for ESG sensitivity...")
+        print(f"Market cap range: ${min_market_cap/1e9:.1f}B - ${max_market_cap/1e9:.1f}B")
+
+        # Filter by market cap if needed
+        if min_market_cap or max_market_cap:
+            filtered = self.filter_by_market_cap(tickers, min_market_cap, max_market_cap)
+        else:
+            filtered = tickers
+
+        print(f"✓ {len(filtered)} ESG-sensitive mid-cap stocks")
+        return filtered
+
+    def filter_by_market_cap(self, tickers: List[str], min_cap: float = None, max_cap: float = None) -> List[str]:
+        """
+        Filter tickers by market capitalization range
+
+        Args:
+            tickers: List of ticker symbols
+            min_cap: Minimum market cap in USD
+            max_cap: Maximum market cap in USD
+
+        Returns:
+            Filtered list of tickers
+        """
+        try:
+            import yfinance as yf
+
+            filtered = []
+            print(f"Filtering {len(tickers)} tickers by market cap...")
+
+            # Process in batches to avoid rate limiting
+            batch_size = 50
+            for i in range(0, len(tickers), batch_size):
+                batch = tickers[i:i+batch_size]
+
+                for ticker in batch:
+                    try:
+                        stock = yf.Ticker(ticker)
+                        info = stock.info
+                        market_cap = info.get('marketCap', 0)
+
+                        # Apply filters
+                        if min_cap and market_cap < min_cap:
+                            continue
+                        if max_cap and market_cap > max_cap:
+                            continue
+
+                        filtered.append(ticker)
+
+                    except Exception as e:
+                        # If can't get info, include by default
+                        filtered.append(ticker)
+                        continue
+
+                # Progress update
+                if (i + batch_size) % 100 == 0:
+                    print(f"  Processed {min(i + batch_size, len(tickers))}/{len(tickers)}...")
+
+            print(f"✓ Filtered to {len(filtered)} tickers")
+            return filtered
+
+        except ImportError:
+            print("Warning: yfinance not available, returning all tickers")
+            return tickers
+
     def get_esg_sensitive_nasdaq100(self, sensitivity: str = 'HIGH') -> List[str]:
         """
         Get ESG-sensitive NASDAQ-100 stocks

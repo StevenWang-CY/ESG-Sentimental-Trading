@@ -133,20 +133,20 @@ class DashboardData:
                     content = f.read()
 
                 for line in content.split('\n'):
-                    if 'Sharpe Ratio:' in line:
+                    if 'sharpe_ratio' in line:
                         results['sharpe_ratio'] = float(line.split(':')[1].strip())
-                    elif 'Sortino Ratio:' in line:
+                    elif 'sortino_ratio' in line:
                         results['sortino_ratio'] = float(line.split(':')[1].strip())
-                    elif 'Total Return:' in line:
+                    elif 'total_return ' in line and 'total_return_pct' not in line:
                         results['total_return'] = float(line.split(':')[1].strip().replace('%', ''))
-                    elif 'Volatility:' in line and 'Ann' not in line:
+                    elif 'volatility' in line and 'annualized' not in line:
                         results['volatility'] = float(line.split(':')[1].strip().replace('%', ''))
-                    elif 'Max Drawdown:' in line:
+                    elif 'max_drawdown' in line:
                         results['max_drawdown'] = float(line.split(':')[1].strip().replace('%', ''))
-                    elif 'Turnover:' in line:
-                        results['turnover'] = float(line.split(':')[1].strip().replace('x', ''))
-                    elif 'Total Trades:' in line:
-                        results['num_trades'] = int(line.split(':')[1].strip())
+                    elif 'turnover' in line:
+                        results['turnover'] = float(line.split(':')[1].strip())
+                    elif 'num_trades' in line:
+                        results['num_trades'] = int(float(line.split(':')[1].strip()))
 
                 return results
 

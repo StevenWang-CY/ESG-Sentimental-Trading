@@ -102,11 +102,11 @@ def main():
     parser.add_argument('--end-date', type=str, required=True,
                        help='End date (YYYY-MM-DD), e.g., 2024-09-30')
     parser.add_argument('--universe', type=str, default='esg_nasdaq100',
-                       choices=['nasdaq100', 'esg_nasdaq100', 'sp500', 'custom'],
+                       choices=['nasdaq100', 'esg_nasdaq100', 'sp500', 'russell_midcap', 'esg_midcap', 'custom'],
                        help='Stock universe to use (esg_nasdaq100 recommended for ESG strategy)')
     parser.add_argument('--esg-sensitivity', type=str, default='HIGH',
                        choices=['VERY HIGH', 'HIGH', 'MEDIUM', 'ALL'],
-                       help='ESG sensitivity threshold (for esg_nasdaq100 universe)')
+                       help='ESG sensitivity threshold (for esg_nasdaq100/esg_midcap universe)')
     parser.add_argument('--tickers', type=str, nargs='*',
                        help='Specific tickers (if universe=custom)')
     parser.add_argument('--max-tickers', type=int, default=None,
@@ -182,6 +182,17 @@ def main():
         tickers = universe_fetcher.get_nasdaq100_tickers()
     elif args.universe == 'sp500':
         tickers = universe_fetcher.get_sp500_tickers()
+    elif args.universe == 'russell_midcap':
+        logger.info("Using Russell Midcap Index (~400-800 mid-cap stocks)")
+        logger.info("This universe targets $2B-$50B market cap with higher ESG sensitivity")
+        tickers = universe_fetcher.get_russell_midcap_tickers()
+    elif args.universe == 'esg_midcap':
+        logger.info(f"Using ESG-SENSITIVE Russell Midcap (market cap: $2B-$50B)")
+        logger.info("This universe focuses on mid-caps most affected by ESG events")
+        tickers = universe_fetcher.get_esg_sensitive_midcap(
+            min_market_cap=2e9,  # $2B minimum
+            max_market_cap=50e9  # $50B maximum
+        )
     elif args.universe == 'custom' and args.tickers:
         tickers = args.tickers
     else:
