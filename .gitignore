@@ -48,6 +48,9 @@ data/portfolio_*.csv
 data/signals_*.csv
 data/universe_*.csv
 
+# Social media cache (Reddit/Twitter data)
+data/social_media/*.pkl
+
 # Results
 results/figures/*
 results/tear_sheets/*

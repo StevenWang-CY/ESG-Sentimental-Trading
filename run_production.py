@@ -1,6 +1,24 @@
 """
 Production Runner for ESG Event-Driven Alpha Strategy
 Runs on real NASDAQ-100 stocks with real social media data (Reddit/Twitter)
+
+INTELLIGENT CACHING SYSTEM (3-Tier Architecture):
+===============================================
+1. IMMUTABLE DATA CACHE (never invalidate):
+   - SEC filings: data/filings_{universe}_{dates}_n{count}.pkl
+   - Historical prices (>60 days): data/prices_{universe}_{dates}_n{count}.pkl
+
+2. CONFIG-DEPENDENT CACHE (invalidate on config change):
+   - Events: data/events_{universe}_{dates}_{config_hash}.pkl
+   - Social media: data/social_media/{source}_{ticker}_{date}_d{before}_{after}_max{n}.pkl
+
+3. TIME-FRESH CACHE (invalidate by age):
+   - Recent prices (<60 days): Refresh if >24 hours old
+
+Cache Control:
+   --use-cache: Use cached data when available (default: True)
+   --force-refresh: Force refresh all data (ignore cache)
+   --clear-cache: Delete all cached data before running
 """
 
 import argparse
@@ -13,6 +31,7 @@ import sys
 
 # Import project modules
 from src.utils.logging_config import setup_logging
+from src.utils.cache_manager import compute_config_hash, is_cache_fresh, build_cache_key
 from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher, RedditFetcher
 from src.data.universe_fetcher import UniverseFetcher
 from src.preprocessing import SECFilingParser, TextCleaner
@@ -113,6 +132,12 @@ def main():
                        help='Limit number of tickers to process')
     parser.add_argument('--save-data', action='store_true',
                        help='Save intermediate data to disk')
+    parser.add_argument('--use-cache', action='store_true', default=True,
+                       help='Use cached data when available (default: True)')
+    parser.add_argument('--force-refresh', action='store_true',
+                       help='Force refresh all data (ignore cache)')
+    parser.add_argument('--clear-cache', action='store_true',
+                       help='Delete all cached data before running')
     parser.add_argument('--force-real-social-media', action='store_true',
                        help='Force real social media API (override mock mode)')
     parser.add_argument('--social-source', type=str, choices=['reddit', 'twitter'],
@@ -122,6 +147,16 @@ def main():
 
     # Load configuration
     config = load_config(args.config)
+
+    # Handle cache clearing if requested
+    if args.clear_cache:
+        from src.utils.cache_manager import clear_cache
+        data_dir = Path('data')
+        cleared = clear_cache(data_dir)
+        print(f"Cleared {cleared} cache files from {data_dir}")
+        if not args.force_refresh:
+            # If only clearing cache, exit
+            return
 
     # Setup logging
     logger = setup_logging(
@@ -215,56 +250,104 @@ def main():
 
     # Step 2: Download SEC filings
     logger.info("\n>>> STEP 2: DOWNLOADING SEC FILINGS")
-    sec_downloader = SECDownloader(
-        company_name=config['data']['sec']['company_name'],
-        email=config['data']['sec']['email']
+
+    # Build cache key for SEC filings (immutable data - no config hash needed)
+    filings_cache_file = Path('data') / build_cache_key(
+        data_type='filings',
+        universe=args.universe,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        ticker_count=len(tickers)
     )
 
-    all_filings = []
-    for i, ticker in enumerate(tickers):
-        logger.info(f"Downloading filings for {ticker} ({i+1}/{len(tickers)})...")
+    # Try to load from cache
+    if filings_cache_file.exists() and args.use_cache and not args.force_refresh:
+        logger.info(f"✓ Loading cached SEC filings from {filings_cache_file.name}")
+        all_filings = pd.read_pickle(filings_cache_file)
+        logger.info(f"Loaded {len(all_filings)} cached SEC filings")
+    else:
+        # Download from SEC EDGAR
+        if args.force_refresh:
+            logger.info("Force refresh enabled - downloading fresh data from SEC EDGAR")
+        else:
+            logger.info("No cache found - downloading from SEC EDGAR")
 
-        filings = sec_downloader.fetch_filings(
-            tickers=[ticker],
-            filing_type='8-K',  # Focus on 8-K for material events
-            start_date=args.start_date,
-            end_date=args.end_date
+        sec_downloader = SECDownloader(
+            company_name=config['data']['sec']['company_name'],
+            email=config['data']['sec']['email']
         )
 
-        all_filings.extend(filings)
+        all_filings = []
+        for i, ticker in enumerate(tickers):
+            logger.info(f"Downloading filings for {ticker} ({i+1}/{len(tickers)})...")
 
-        # Rate limiting (SEC allows 10 requests/second)
-        if i < len(tickers) - 1:
-            import time
-            time.sleep(0.1)
+            filings = sec_downloader.fetch_filings(
+                tickers=[ticker],
+                filing_type='8-K',  # Focus on 8-K for material events
+                start_date=args.start_date,
+                end_date=args.end_date
+            )
 
-    logger.info(f"Downloaded {len(all_filings)} SEC filings")
+            all_filings.extend(filings)
 
-    if args.save_data:
-        filings_file = f"data/filings_{args.start_date}_to_{args.end_date}.pkl"
-        pd.to_pickle(all_filings, filings_file)
-        logger.info(f"Saved filings to {filings_file}")
+            # Rate limiting (SEC allows 10 requests/second)
+            if i < len(tickers) - 1:
+                import time
+                time.sleep(0.1)
+
+        logger.info(f"Downloaded {len(all_filings)} SEC filings")
+
+        # Save to cache if requested
+        if args.save_data or args.use_cache:
+            filings_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            pd.to_pickle(all_filings, filings_cache_file)
+            logger.info(f"Saved filings to {filings_cache_file.name}")
 
     # Step 3: Fetch price data
     logger.info("\n>>> STEP 3: FETCHING PRICE DATA")
-    price_fetcher = PriceFetcher()
 
     # Extend date range for returns calculation
     extended_start = (start_date - timedelta(days=30)).strftime('%Y-%m-%d')
     extended_end = (end_date + timedelta(days=30)).strftime('%Y-%m-%d')
 
-    prices = price_fetcher.fetch_price_data(
-        tickers=tickers,
-        start_date=extended_start,
-        end_date=extended_end
+    # Build cache key for price data (time-sensitive for recent data)
+    prices_cache_file = Path('data') / build_cache_key(
+        data_type='prices',
+        universe=args.universe,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        ticker_count=len(tickers)
     )
 
-    logger.info(f"Fetched price data: {len(prices)} rows")
+    # Try to load from cache (check freshness for recent data)
+    if (prices_cache_file.exists() and args.use_cache and not args.force_refresh and
+        is_cache_fresh(prices_cache_file, args.end_date, max_age_days=60)):
+        logger.info(f"✓ Loading cached price data from {prices_cache_file.name}")
+        prices = pd.read_pickle(prices_cache_file)
+        logger.info(f"Loaded {len(prices)} rows of cached price data")
+    else:
+        # Fetch from yfinance
+        if args.force_refresh:
+            logger.info("Force refresh enabled - fetching fresh price data from yfinance")
+        elif not prices_cache_file.exists():
+            logger.info("No cache found - fetching from yfinance")
+        else:
+            logger.info("Cache stale - fetching fresh price data from yfinance")
 
-    if args.save_data:
-        prices_file = f"data/prices_{args.start_date}_to_{args.end_date}.pkl"
-        prices.to_pickle(prices_file)
-        logger.info(f"Saved prices to {prices_file}")
+        price_fetcher = PriceFetcher()
+        prices = price_fetcher.fetch_price_data(
+            tickers=tickers,
+            start_date=extended_start,
+            end_date=extended_end
+        )
+
+        logger.info(f"Fetched price data: {len(prices)} rows")
+
+        # Save to cache if requested
+        if args.save_data or args.use_cache:
+            prices_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            prices.to_pickle(prices_cache_file)
+            logger.info(f"Saved prices to {prices_cache_file.name}")
 
     # Step 4: Load Fama-French factors
     logger.info("\n>>> STEP 4: LOADING FAMA-FRENCH FACTORS")
@@ -280,37 +363,72 @@ def main():
     source_name = "Reddit" if social_source == 'reddit' else "Twitter"
     logger.info(f"\n>>> STEP 5: EVENT DETECTION & {source_name.upper()} SENTIMENT ANALYSIS")
 
-    # Initialize NLP components
-    parser = SECFilingParser()
-    text_cleaner = TextCleaner()
-    event_detector = ESGEventDetector()
-    sentiment_analyzer = FinancialSentimentAnalyzer()
-    feature_extractor = ReactionFeatureExtractor(sentiment_analyzer)
+    # Compute config hash for events cache (depends on NLP parameters)
+    nlp_config_keys = [
+        'nlp.event_detector.confidence_threshold',
+        'nlp.event_detector.type',
+        'nlp.sentiment_analyzer.model',
+        'data.social_media.days_before_event',
+        'data.social_media.days_after_event',
+        'data.social_media.max_posts_per_ticker'
+    ]
+    nlp_hash = compute_config_hash(config, nlp_config_keys)
 
-    # Initialize social media fetcher (Reddit or Twitter)
-    social_media_config = config['data']['social_media']
+    # Build cache key for events (config-dependent)
+    events_cache_file = Path('data') / build_cache_key(
+        data_type='events',
+        universe=args.universe,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        config_hash=nlp_hash
+    )
 
-    if social_source == 'reddit':
-        reddit_config = config['data']['reddit']
-        social_media_fetcher = RedditFetcher(
-            client_id=reddit_config.get('client_id'),
-            client_secret=reddit_config.get('client_secret'),
-            user_agent=reddit_config.get('user_agent', 'ESG Sentiment Trading Bot 1.0'),
-            use_mock=reddit_config.get('use_mock', True)
-        )
-    else:  # twitter
-        twitter_config = config['data']['twitter']
-        social_media_fetcher = TwitterFetcher(
-            bearer_token=twitter_config.get('bearer_token') if not twitter_config.get('use_mock') else None,
-            use_mock=twitter_config.get('use_mock', True)
-        )
-
-    if use_real_data:
-        logger.info(f"✓ Using REAL {source_name} API")
+    # Try to load from cache
+    if events_cache_file.exists() and args.use_cache and not args.force_refresh:
+        logger.info(f"✓ Loading cached events from {events_cache_file.name}")
+        logger.info(f"  Config hash: {nlp_hash} (NLP parameters unchanged)")
+        events_data = pd.read_pickle(events_cache_file)
+        logger.info(f"Loaded {len(events_data)} cached ESG events")
     else:
-        logger.info(f"⚠ Using MOCK {source_name} data")
+        # Process events from scratch
+        if args.force_refresh:
+            logger.info("Force refresh enabled - detecting events from scratch")
+        elif not events_cache_file.exists():
+            logger.info(f"No cache found (config hash: {nlp_hash}) - detecting events")
+        else:
+            logger.info("Config changed - re-detecting events with new parameters")
 
-    events_data = []
+        # Initialize NLP components
+        parser = SECFilingParser()
+        text_cleaner = TextCleaner()
+        event_detector = ESGEventDetector()
+        sentiment_analyzer = FinancialSentimentAnalyzer()
+        feature_extractor = ReactionFeatureExtractor(sentiment_analyzer)
+
+        # Initialize social media fetcher (Reddit or Twitter)
+        social_media_config = config['data']['social_media']
+
+        if social_source == 'reddit':
+            reddit_config = config['data']['reddit']
+            social_media_fetcher = RedditFetcher(
+                client_id=reddit_config.get('client_id'),
+                client_secret=reddit_config.get('client_secret'),
+                user_agent=reddit_config.get('user_agent', 'ESG Sentiment Trading Bot 1.0'),
+                use_mock=reddit_config.get('use_mock', True)
+            )
+        else:  # twitter
+            twitter_config = config['data']['twitter']
+            social_media_fetcher = TwitterFetcher(
+                bearer_token=twitter_config.get('bearer_token') if not twitter_config.get('use_mock') else None,
+                use_mock=twitter_config.get('use_mock', True)
+            )
+
+        if use_real_data:
+            logger.info(f"✓ Using REAL {source_name} API")
+        else:
+            logger.info(f"⚠ Using MOCK {source_name} data")
+
+        events_data = []
 
     # FIX 1.2: Defensive date filtering (second layer of defense)
     # Filter out any filings that somehow got through with wrong dates
@@ -372,16 +490,35 @@ def main():
 
                 # Fetch social media data
                 event_date = datetime.strptime(filing.get('date', args.start_date), '%Y-%m-%d')
-                logger.info(f"  Fetching {source_name} data around {event_date.date()}...")
 
-                posts_df = social_media_fetcher.fetch_tweets_for_event(
-                    ticker=filing['ticker'],
-                    event_date=event_date,
-                    keywords=social_media_config.get('esg_keywords', []),
-                    days_before=social_media_config.get('days_before_event', 3),
-                    days_after=social_media_config.get('days_after_event', 7),
-                    max_results=social_media_config.get('max_posts_per_ticker', 100)
-                )
+                # Build per-event cache for social media posts
+                days_before = social_media_config.get('days_before_event', 3)
+                days_after = social_media_config.get('days_after_event', 7)
+                max_results = social_media_config.get('max_posts_per_ticker', 100)
+
+                social_cache_dir = Path('data/social_media')
+                social_cache_dir.mkdir(parents=True, exist_ok=True)
+                social_cache_file = social_cache_dir / f"{social_source}_{filing['ticker']}_{event_date.date()}_d{days_before}_{days_after}_max{max_results}.pkl"
+
+                # Try to load from cache
+                if social_cache_file.exists() and args.use_cache and not args.force_refresh:
+                    logger.info(f"  ✓ Loading cached {source_name} data from {social_cache_file.name}")
+                    posts_df = pd.read_pickle(social_cache_file)
+                else:
+                    # Fetch from API
+                    logger.info(f"  Fetching {source_name} data around {event_date.date()}...")
+                    posts_df = social_media_fetcher.fetch_tweets_for_event(
+                        ticker=filing['ticker'],
+                        event_date=event_date,
+                        keywords=social_media_config.get('esg_keywords', []),
+                        days_before=days_before,
+                        days_after=days_after,
+                        max_results=max_results
+                    )
+
+                    # Save to cache
+                    if args.save_data or args.use_cache:
+                        posts_df.to_pickle(social_cache_file)
 
                 if posts_df.empty:
                     logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}")
@@ -405,12 +542,13 @@ def main():
             logger.error(f"  Error processing filing: {e}")
             continue
 
-    logger.info(f"\nDetected {len(events_data)} ESG events with {source_name} reactions")
+        logger.info(f"\nDetected {len(events_data)} ESG events with {source_name} reactions")
 
-    if args.save_data:
-        events_file = f"data/events_{args.start_date}_to_{args.end_date}.pkl"
-        pd.to_pickle(events_data, events_file)
-        logger.info(f"Saved events to {events_file}")
+        # Save to cache if requested
+        if args.save_data or args.use_cache:
+            events_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            pd.to_pickle(events_data, events_cache_file)
+            logger.info(f"Saved events to {events_cache_file.name} (hash: {nlp_hash})")
 
     if len(events_data) == 0:
         logger.warning("No events detected. Cannot generate signals.")
@@ -423,7 +561,19 @@ def main():
     # Step 6: Signal Generation
     logger.info("\n>>> STEP 6: SIGNAL GENERATION")
 
-    signal_generator = ESGSignalGenerator()
+    # Load quality filter thresholds from config (relaxed for Russell Midcap)
+    quality_filters = config.get('signals', {}).get('quality_filters', {})
+    min_intensity = quality_filters.get('min_intensity', 0.05)
+    min_volume_ratio = quality_filters.get('min_volume_ratio', 1.5)
+
+    logger.info(f"Quality Filters (Russell Midcap optimized):")
+    logger.info(f"  Min intensity: {min_intensity} (vs 0.10 for large-caps)")
+    logger.info(f"  Min volume ratio: {min_volume_ratio}x (vs 2.50x for large-caps)")
+
+    signal_generator = ESGSignalGenerator(
+        min_intensity=min_intensity,
+        min_volume_ratio=min_volume_ratio
+    )
 
     # FIX 2.2: Use batch processing to apply cross-sectional ranking
     # Previously called compute_signal() individually, which assigned Q3 to all sparse signals

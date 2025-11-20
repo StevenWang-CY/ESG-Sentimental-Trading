@@ -59,7 +59,7 @@ nlp:
   event_detector:
     type: "rule_based"  # rule_based or ml
     ml_model: "yiyanghkust/finbert-esg"  # Only used if type=ml
-    confidence_threshold: 0.50  # RAISED to 0.50 for high-quality events only (evidence-based optimization)
+    confidence_threshold: 0.30  # LOWERED to 0.30 to increase trade count (balanced quality vs quantity)
 
   # Sentiment Analysis
   sentiment_analyzer:
@@ -77,6 +77,11 @@ signals:
 
   # Signal Parameters
   lookback_window: 252  # Days for z-score calculation
+
+  # Quality Filters (Research-Optimized for Russell Midcap)
+  quality_filters:
+    min_intensity: 0.05      # REDUCED from 0.10 - mid-caps have lower social media coverage
+    min_volume_ratio: 1.5    # REDUCED from 2.50 - mid-caps have lower liquidity than large-caps
 
 # Portfolio Construction
 portfolio:

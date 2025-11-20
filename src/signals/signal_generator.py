@@ -15,16 +15,24 @@ class ESGSignalGenerator:
     """
 
     def __init__(self, lookback_window: int = 252,
-                 weights: Optional[Dict[str, float]] = None):
+                 weights: Optional[Dict[str, float]] = None,
+                 min_intensity: float = 0.05,
+                 min_volume_ratio: float = 1.5):
         """
         Initialize signal generator
 
         Args:
             lookback_window: Window for z-score normalization
             weights: Custom weights for signal components
+            min_intensity: Minimum absolute sentiment intensity filter
+            min_volume_ratio: Minimum volume ratio filter
         """
         self.lookback_window = lookback_window
         self.history = []  # Store historical scores for ranking
+
+        # Quality filter thresholds (configurable)
+        self.min_intensity = min_intensity
+        self.min_volume_ratio = min_volume_ratio
 
         # Default weights
         self.weights = weights or {
@@ -288,16 +296,16 @@ class ESGSignalGenerator:
         df_signals = self._apply_cross_sectional_ranking(df_signals)
 
         # NEW: Apply quality filters (Priority 1 improvements)
-        print(f"\n📊 Signal Quality Filters (Research-Based):")
+        print(f"\n📊 Signal Quality Filters (Research-Based for Russell Midcap):")
         print(f"  Signals before filtering: {len(df_signals)}")
 
-        # Filter 1: Minimum volume ratio (2.5x baseline)
-        df_signals = self.filter_by_volume(df_signals, min_volume_ratio=2.5)
-        print(f"  After volume filter (≥2.5x): {len(df_signals)}")
+        # Filter 1: Minimum volume ratio (configurable, default 1.5x for mid-caps)
+        df_signals = self.filter_by_volume(df_signals, min_volume_ratio=self.min_volume_ratio)
+        print(f"  After volume filter (≥{self.min_volume_ratio}x): {len(df_signals)}")
 
-        # Filter 2: Non-zero sentiment (|intensity| > 0.1)
-        df_signals = self.filter_by_sentiment(df_signals, min_abs_intensity=0.1)
-        print(f"  After sentiment filter (|intensity|>0.1): {len(df_signals)}")
+        # Filter 2: Non-zero sentiment (configurable, default |intensity| > 0.05 for mid-caps)
+        df_signals = self.filter_by_sentiment(df_signals, min_abs_intensity=self.min_intensity)
+        print(f"  After sentiment filter (|intensity|>{self.min_intensity}): {len(df_signals)}")
 
         # CRITICAL: Validate signal quality after generation
         self.validate_signal_quality(df_signals)
