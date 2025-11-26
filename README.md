@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-A production-ready quantitative trading strategy that exploits market inefficiencies around Environmental, Social, and Governance (ESG) events. The system combines advanced NLP sentiment analysis with event-driven signals to generate alpha in equity markets, specifically targeting ESG-sensitive companies that exhibit predictable price reactions to sentiment shifts.
+A production-ready quantitative trading strategy that exploits market inefficiencies around Environmental, Social, and Governance (ESG) events. The system combines advanced NLP sentiment analysis with event-driven signals to generate alpha in equity markets, specifically targeting ESG-sensitive companies that exhibit predictable price reactions to the sentiment shifts.
 
 **Status**: Production-Ready with Research-Optimized Configuration ✅
 **Version**: 3.2
