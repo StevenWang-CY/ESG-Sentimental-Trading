@@ -3,11 +3,32 @@ Reddit Data Fetcher
 Fetches Reddit posts related to stock tickers and ESG events using Reddit API (PRAW)
 """
 
+import os
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import time
+
+
+def _load_credential(value: Optional[str], env_var: str) -> Optional[str]:
+    """
+    Load credential from value or environment variable.
+
+    If value is None, empty, or looks like a placeholder (contains ${...}),
+    try to load from environment variable instead.
+
+    Args:
+        value: Value from config file
+        env_var: Name of environment variable to check
+
+    Returns:
+        Credential value or None
+    """
+    if value and not value.startswith('${'):
+        return value
+    # Load from environment variable
+    return os.environ.get(env_var)
 
 
 class RedditFetcher:
@@ -25,13 +46,14 @@ class RedditFetcher:
         Initialize Reddit fetcher
 
         Args:
-            client_id: Reddit API client ID
-            client_secret: Reddit API client secret
+            client_id: Reddit API client ID (or will load from REDDIT_CLIENT_ID env var)
+            client_secret: Reddit API client secret (or will load from REDDIT_CLIENT_SECRET env var)
             user_agent: User agent string (e.g., "ESG Research Bot 1.0")
             use_mock: If True, generate mock data instead of real API calls
         """
-        self.client_id = client_id
-        self.client_secret = client_secret
+        # Load credentials from environment variables if not provided or if placeholders
+        self.client_id = _load_credential(client_id, 'REDDIT_CLIENT_ID')
+        self.client_secret = _load_credential(client_secret, 'REDDIT_CLIENT_SECRET')
         self.user_agent = user_agent or "ESG Sentiment Trading Bot 1.0"
         self.use_mock = use_mock
         self.reddit = None

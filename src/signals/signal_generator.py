@@ -26,12 +26,16 @@ class ESGSignalGenerator:
         self.lookback_window = lookback_window
         self.history = []  # Store historical scores for ranking
 
-        # Default weights
+        # Default weights (research-backed: MDPI 2025, Nature 2024)
+        # Optional weights for max_sentiment and polarization can improve alpha
         self.weights = weights or {
-            'event_severity': 0.3,
-            'intensity': 0.4,
-            'volume': 0.2,
-            'duration': 0.1
+            'event_severity': 0.20,  # Event detection confidence
+            'intensity': 0.45,       # PRIMARY: Mean sentiment magnitude
+            'volume': 0.25,          # Social conviction
+            'duration': 0.10,        # Persistence
+            # NEW: Research-backed enhancements (optional, set to 0 to disable)
+            'max_sentiment': 0.0,    # Maximum sentiment (MDPI 2025)
+            'polarization': 0.0      # Sentiment disagreement (std)
         }
 
     def compute_raw_score(self, event_features: Dict, reaction_features: Dict) -> float:
@@ -40,6 +44,11 @@ class ESGSignalGenerator:
 
         Formula:
         Score = w1*EventSeverity + w2*Intensity + w3*Volume + w4*Duration
+                + w5*MaxSentiment + w6*Polarization
+
+        Academic references:
+        - MDPI (2025): Max and std of sentiment are significant predictors
+        - Nature (2024): Weighted sentiment improves prediction
 
         Args:
             event_features: Dictionary with event detection results
@@ -68,12 +77,23 @@ class ESGSignalGenerator:
         duration_days = reaction_features.get('duration_days', 0)
         duration_normalized = min(duration_days / 7.0, 1.0)
 
-        # Compute weighted sum
+        # 5. NEW: Max Sentiment (MDPI 2025 - max is predictive)
+        max_sentiment_raw = reaction_features.get('max_sentiment', 0.0)
+        max_sentiment_normalized = (max_sentiment_raw + 1.0) / 2.0
+
+        # 6. NEW: Polarization/Sentiment Std (disagreement measure)
+        # Higher polarization indicates market disagreement - can amplify moves
+        polarization = reaction_features.get('polarization', 0.0)
+        polarization_normalized = min(polarization, 1.0)  # Already in [0, 1] range
+
+        # Compute weighted sum (new features have default weight 0)
         raw_score = (
-            self.weights['event_severity'] * event_severity +
-            self.weights['intensity'] * intensity_normalized +
-            self.weights['volume'] * volume_normalized +
-            self.weights['duration'] * duration_normalized
+            self.weights.get('event_severity', 0.20) * event_severity +
+            self.weights.get('intensity', 0.45) * intensity_normalized +
+            self.weights.get('volume', 0.25) * volume_normalized +
+            self.weights.get('duration', 0.10) * duration_normalized +
+            self.weights.get('max_sentiment', 0.0) * max_sentiment_normalized +
+            self.weights.get('polarization', 0.0) * polarization_normalized
         )
 
         return raw_score

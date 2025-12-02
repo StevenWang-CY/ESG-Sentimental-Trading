@@ -130,10 +130,12 @@ def baseline_config():
         },
         'signals': {
             'weights': {
-                'event_severity': 0.3,
-                'intensity': 0.4,
-                'volume': 0.2,
-                'duration': 0.1
+                'event_severity': 0.20,  # Event detection confidence
+                'intensity': 0.45,       # PRIMARY: Sentiment (research-backed)
+                'volume': 0.25,          # Social conviction
+                'duration': 0.10,        # Persistence
+                'max_sentiment': 0.0,    # Optional: MDPI 2025
+                'polarization': 0.0      # Optional: Sentiment std
             }
         },
         'backtest': {
@@ -168,10 +170,12 @@ def failed_high_config():
         },
         'signals': {
             'weights': {
-                'event_severity': 0.3,
-                'intensity': 0.4,
-                'volume': 0.2,
-                'duration': 0.1
+                'event_severity': 0.20,  # Event detection confidence
+                'intensity': 0.45,       # PRIMARY: Sentiment (research-backed)
+                'volume': 0.25,          # Social conviction
+                'duration': 0.10,        # Persistence
+                'max_sentiment': 0.0,    # Optional: MDPI 2025
+                'polarization': 0.0      # Optional: Sentiment std
             }
         },
         'backtest': {

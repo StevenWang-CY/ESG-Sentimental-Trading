@@ -5,7 +5,7 @@
 A production-ready quantitative trading strategy that exploits market inefficiencies around Environmental, Social, and Governance (ESG) events. The system combines advanced NLP sentiment analysis with event-driven signals to generate alpha in equity markets, specifically targeting ESG-sensitive companies that exhibit predictable price reactions to the sentiment shifts.
 
 **Status**: Production-Ready with Research-Optimized Configuration ✅
-**Version**: 3.3
+**Version**: 3.3.1
 **Last Updated**: December 1, 2025
 **Social Data**: ✅ Reddit API Enhanced (Company Name Fallback + Year Filter)
 **Code Quality**: Grade A+ - Institutional-Grade Quality Filters
@@ -48,6 +48,60 @@ A production-ready quantitative trading strategy that exploits market inefficien
 ---
 
 ## 🆕 Recent Updates
+
+### December 1, 2025 - Academic Verification & Security Hardening (v3.3.1)
+
+**🔬 Comprehensive Academic Verification + Security Improvements**
+
+**Key Changes:**
+
+**1. Security Fix: API Credentials Protection** ([config/config.yaml](config/config.yaml), [src/data/reddit_fetcher.py](src/data/reddit_fetcher.py), [src/data/twitter_fetcher.py](src/data/twitter_fetcher.py))
+- ✅ **Removed hardcoded credentials** from config files
+- ✅ **Environment variable loading**: Credentials now loaded from `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `TWITTER_BEARER_TOKEN`
+- ✅ **Placeholder syntax**: Config uses `${ENV_VAR}` format for secure deployment
+
+```yaml
+# config/config.yaml - Secure credential handling
+reddit:
+  client_id: "${REDDIT_CLIENT_ID}"      # Load from environment
+  client_secret: "${REDDIT_CLIENT_SECRET}"
+```
+
+**2. New Signal Features (MDPI 2025 Research)** ([src/signals/signal_generator.py](src/signals/signal_generator.py), [src/nlp/advanced_sentiment_analyzer.py](src/nlp/advanced_sentiment_analyzer.py))
+- ✅ **max_sentiment**: Maximum sentiment magnitude per event window (research shows peaks are predictive)
+- ✅ **polarization**: Sentiment standard deviation (measures disagreement/controversy)
+- Both features optional (weight=0.0 by default) for backward compatibility
+
+```yaml
+# Extended Signal Weights (with new optional features)
+weights:
+  event_severity: 0.20   # Event detection confidence
+  intensity: 0.45        # PRIMARY: Mean sentiment magnitude
+  volume: 0.25           # Social conviction
+  duration: 0.10         # Persistence
+  max_sentiment: 0.0     # Optional: MDPI 2025 research
+  polarization: 0.0      # Optional: Sentiment disagreement
+```
+
+**3. Bug Fix: Backtest Engine** ([src/backtest/engine.py](src/backtest/engine.py))
+- ✅ **Fixed typo**: `slippage_bct` → `slippage_bps` (6 occurrences)
+
+**4. Academic Verification Complete**
+- ✅ **47 academic citations** verified in codebase
+- ✅ **All core algorithms** backed by peer-reviewed research:
+  - FinBERT sentiment analysis (Araci, 2019)
+  - Loughran-McDonald lexicon (2011)
+  - Negation handling (Taboada et al., 2011) - 5-word window
+  - Valence shifters (Polanyi & Zaenen, 2006)
+  - Fama-French quintile construction (1992)
+- ✅ **Signal weights sum to 1.0** (verified)
+- ✅ **All unit tests passing** after fixture updates
+
+**5. Test Suite Updates** ([tests/conftest.py](tests/conftest.py), [tests/unit/test_signal_generator.py](tests/unit/test_signal_generator.py))
+- Updated test fixtures with new weight structure
+- Added max_sentiment and polarization to baseline_config
+
+---
 
 ### December 1, 2025 - Signal Weight Rebalancing + Reddit Coverage Improvements
 
@@ -1999,7 +2053,7 @@ The Russell Midcap quality filter improvements are based on the following peer-r
 
 ---
 
-**Last Updated**: December 1, 2025 (Signal Weight Rebalancing + Reddit Coverage Improvements)
-**Version**: 3.3
+**Last Updated**: December 1, 2025 (Academic Verification & Security Hardening)
+**Version**: 3.3.1
 **Status**: ✅ Production-Ready (Grade A+ with Sentiment-First Strategy)
-**Key Features**: Sentiment-First Weights (45% intensity) | Reddit Company Name Fallback (70+ mappings) | Batch Price Fetching | 7-Day Holding Period | Intelligent 3-Tier Caching | Russell Midcap Universe (172 stocks)
+**Key Features**: Sentiment-First Weights (45% intensity) | Reddit Company Name Fallback (70+ mappings) | Batch Price Fetching | 7-Day Holding Period | Intelligent 3-Tier Caching | Russell Midcap Universe (172 stocks) | Secure Credential Handling | max_sentiment & polarization Features

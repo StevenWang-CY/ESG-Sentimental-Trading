@@ -425,6 +425,9 @@ class AdvancedSentimentAnalyzer:
         # Additional features
         mean_sentiment = np.mean(scores)
 
+        # NEW: Max sentiment magnitude (research shows max is predictive - MDPI 2025)
+        max_sentiment = max(scores, key=abs) if scores else 0.0
+
         # Sentiment trend (if timestamps available)
         sentiment_trend = 0.0
         if timestamps and len(timestamps) > 1:
@@ -437,8 +440,9 @@ class AdvancedSentimentAnalyzer:
             'intensity': weighted_intensity,
             'volume': volume,
             'duration': duration,
-            'polarization': polarization,
+            'polarization': polarization,  # Sentiment std (disagreement measure)
             'mean_sentiment': mean_sentiment,
+            'max_sentiment': max_sentiment,  # NEW: Maximum sentiment for signal enhancement
             'sentiment_trend': sentiment_trend
         }
 

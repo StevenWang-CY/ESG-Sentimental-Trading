@@ -31,11 +31,12 @@ data:
       - "governance"
 
   # Reddit API Configuration (Free, unlimited historical access)
+  # NOTE: Set credentials in .env file, NOT here. See .env.example for template.
   reddit:
-    client_id: "lGmL5_M2TWsCAoH_F_ClLQ"  # Real Reddit API credentials
-    client_secret: "dXwV6MG2rQnix99kVjYL59HpShwdWg"
+    client_id: "${REDDIT_CLIENT_ID}"  # Load from environment variable
+    client_secret: "${REDDIT_CLIENT_SECRET}"  # Load from environment variable
     user_agent: "ESG Sentiment Trading Bot 1.0"
-    use_mock: false  # Using REAL Reddit API data!
+    use_mock: false  # Set to true if no Reddit API credentials available
     subreddits:  # Subreddits to monitor (r/sustainableinvesting removed - returns 404)
       - "stocks"
       - "investing"

@@ -36,32 +36,40 @@ class TestESGSignalGenerator:
         )
 
     def test_initialization(self, signal_generator, baseline_config):
-        """Test signal generator initializes with correct weights"""
-        assert signal_generator.weights['event_severity'] == 0.3
-        assert signal_generator.weights['intensity'] == 0.4
-        assert signal_generator.weights['volume'] == 0.2
-        assert signal_generator.weights['duration'] == 0.1
-        assert sum(signal_generator.weights.values()) == pytest.approx(1.0)
+        """Test signal generator initializes with correct weights (research-backed v3.3)"""
+        assert signal_generator.weights['event_severity'] == 0.20
+        assert signal_generator.weights['intensity'] == 0.45  # PRIMARY: Sentiment
+        assert signal_generator.weights['volume'] == 0.25
+        assert signal_generator.weights['duration'] == 0.10
+        # Core weights should sum to 1.0 (optional features have 0 weight by default)
+        core_sum = (signal_generator.weights['event_severity'] +
+                    signal_generator.weights['intensity'] +
+                    signal_generator.weights['volume'] +
+                    signal_generator.weights['duration'])
+        assert core_sum == pytest.approx(1.0)
 
     def test_compute_raw_score(self, signal_generator):
-        """Test raw score computation with known inputs"""
+        """Test raw score computation with known inputs (v3.3 weights)"""
         event_features = {
-            'confidence': 0.35,  # Event severity
+            'confidence': 0.5,  # Event severity
         }
 
         reaction_features = {
-            'sentiment_intensity': 0.65,  # Intensity
-            'volume_ratio': 2.0,          # Volume
+            'intensity': 0.4,             # Mean sentiment [-1, 1] → normalized to 0.7
+            'volume_ratio': 3.0,          # Volume
             'duration_days': 5            # Duration
         }
 
         score = signal_generator.compute_raw_score(event_features, reaction_features)
 
-        # Manual calculation:
-        # Score = 0.3*0.35 + 0.4*0.65 + 0.2*2.0 + 0.1*5
-        # Score = 0.105 + 0.26 + 0.4 + 0.5 = 1.265
+        # Manual calculation with v3.3 weights:
+        # intensity_normalized = (0.4 + 1.0) / 2.0 = 0.7
+        # volume_normalized = min(log1p(3.0) / log(10), 1.0) ≈ 0.602
+        # duration_normalized = min(5 / 7.0, 1.0) ≈ 0.714
+        # Score = 0.20*0.5 + 0.45*0.7 + 0.25*0.602 + 0.10*0.714
+        # Score = 0.10 + 0.315 + 0.1505 + 0.0714 ≈ 0.6369
 
-        assert score == pytest.approx(1.265)
+        assert score == pytest.approx(0.637, abs=0.05)
 
     def test_cross_sectional_ranking_sparse_signals(self, signal_generator):
         """

@@ -48,7 +48,7 @@ class BacktestEngine:
         self.prices = prices
         self.initial_capital = initial_capital
         self.commission_pct = commission_pct
-        self.slippage_bct = slippage_bps / 10000
+        self.slippage_bps = slippage_bps / 10000
         self.enable_risk_management = enable_risk_management and RISK_MANAGEMENT_AVAILABLE
 
         self.portfolio_value = []
@@ -237,7 +237,7 @@ class BacktestEngine:
                     # For longs: get cash back; For shorts: pay cash to cover
                     cash += proceeds
                     # Apply transaction costs
-                    cash -= abs(proceeds) * (self.commission_pct + self.slippage_bct)
+                    cash -= abs(proceeds) * (self.commission_pct + self.slippage_bps)
                     print(f"DEBUG:   Liquidated {ticker} after {days_held} days (holding period: {holding_period})")
             else:
                 # Keep position (still within holding period)
@@ -320,14 +320,14 @@ class BacktestEngine:
             # Calculate shares (accounting for transaction costs)
             if target_value > 0:
                 # Long position
-                shares = int(target_value / (price * (1 + self.commission_pct + self.slippage_bct)))
-                cost = shares * price * (1 + self.commission_pct + self.slippage_bct)
+                shares = int(target_value / (price * (1 + self.commission_pct + self.slippage_bps)))
+                cost = shares * price * (1 + self.commission_pct + self.slippage_bps)
                 cash -= cost
                 print(f"DEBUG:     LONG: {shares} shares @ ${price:.2f} = ${cost:,.2f}")
             else:
                 # Short position (negative shares)
-                shares = int(target_value / (price * (1 - self.commission_pct - self.slippage_bct)))
-                proceeds = abs(shares) * price * (1 - self.commission_pct - self.slippage_bct)
+                shares = int(target_value / (price * (1 - self.commission_pct - self.slippage_bps)))
+                proceeds = abs(shares) * price * (1 - self.commission_pct - self.slippage_bps)
                 cash += proceeds
                 print(f"DEBUG:     SHORT: {shares} shares @ ${price:.2f} = ${proceeds:,.2f}")
 

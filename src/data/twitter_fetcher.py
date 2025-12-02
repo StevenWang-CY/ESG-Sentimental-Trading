@@ -3,11 +3,31 @@ Twitter/X Data Fetcher
 Fetches tweets related to stock tickers and ESG events using Twitter API v2
 """
 
+import os
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import time
+
+
+def _load_credential(value: Optional[str], env_var: str) -> Optional[str]:
+    """
+    Load credential from value or environment variable.
+
+    If value is None, empty, or looks like a placeholder (contains ${...}),
+    try to load from environment variable instead.
+
+    Args:
+        value: Value from config file
+        env_var: Name of environment variable to check
+
+    Returns:
+        Credential value or None
+    """
+    if value and not value.startswith('${'):
+        return value
+    return os.environ.get(env_var)
 
 
 class TwitterFetcher:
@@ -21,17 +41,18 @@ class TwitterFetcher:
         Initialize Twitter fetcher
 
         Args:
-            bearer_token: Twitter API v2 Bearer Token
+            bearer_token: Twitter API v2 Bearer Token (or will load from TWITTER_BEARER_TOKEN env var)
             use_mock: If True, generate mock data instead of real API calls
         """
-        self.bearer_token = bearer_token
+        # Load credentials from environment variables if not provided or if placeholder
+        self.bearer_token = _load_credential(bearer_token, 'TWITTER_BEARER_TOKEN')
         self.use_mock = use_mock
         self.client = None
 
-        if not use_mock and bearer_token:
+        if not use_mock and self.bearer_token:
             try:
                 import tweepy
-                self.client = tweepy.Client(bearer_token=bearer_token, wait_on_rate_limit=True)
+                self.client = tweepy.Client(bearer_token=self.bearer_token, wait_on_rate_limit=True)
                 print("Twitter API client initialized successfully.")
             except ImportError:
                 print("Warning: tweepy not installed. Install with: pip install tweepy")
