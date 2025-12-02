@@ -313,33 +313,71 @@ class UniverseFetcher:
 
     def _get_hardcoded_midcap(self) -> List[str]:
         """
-        Minimal hardcoded mid-cap list for emergency fallback
-        Mix of liquid mid-caps with high ESG exposure
+        ESG-sensitive stocks with HIGH REDDIT COVERAGE
+
+        Strategy: Include both mid-caps AND popular large-caps to ensure
+        sufficient Reddit data for sentiment signals. Popular stocks
+        generate 10-100x more Reddit discussion than obscure mid-caps.
         """
         tickers = [
-            # Energy & Materials (high ESG exposure)
-            'DVN', 'FANG', 'OXY', 'MPC', 'VLO', 'PSX', 'HES', 'CTRA',
+            # === HIGH REDDIT COVERAGE LARGE-CAPS (ESG-sensitive) ===
+            # These stocks dominate Reddit discussion and have strong ESG exposure
+            'TSLA',  # Tesla - EV leader, massive Reddit following, ESG-sensitive
+            'AAPL',  # Apple - Supply chain ESG, huge Reddit presence
+            'MSFT',  # Microsoft - Cloud sustainability, ESG leader
+            'GOOGL', # Alphabet - Data privacy ESG, high Reddit coverage
+            'AMZN',  # Amazon - Labor/ESG issues, very high Reddit coverage
+            'META',  # Meta - Governance issues, high Reddit coverage
+            'NVDA',  # Nvidia - AI/green tech, very high Reddit coverage
+            'AMD',   # AMD - Green computing, high Reddit coverage
+            'INTC',  # Intel - Manufacturing ESG, good Reddit coverage
+
+            # === ENERGY (High ESG exposure + Reddit coverage) ===
+            'DVN', 'FANG', 'OXY', 'MPC', 'VLO', 'PSX', 'CTRA',
+            'XOM',   # Exxon - Climate litigation, high Reddit coverage
+            'CVX',   # Chevron - ESG controversies, high Reddit coverage
+            'COP',   # ConocoPhillips - Energy transition, good coverage
+            'BP',    # BP - Major ESG news, good coverage
+            'SHEL',  # Shell - Energy transition leader
+
+            # === MATERIALS (ESG-sensitive) ===
             'FCX', 'NEM', 'NUE', 'STLD', 'CLF', 'AA', 'X',
 
-            # Consumer Discretionary
+            # === CONSUMER DISCRETIONARY (High Reddit coverage) ===
             'MAR', 'HLT', 'MGM', 'WYNN', 'LVS', 'CCL', 'RCL', 'NCLH',
             'TPR', 'LULU', 'ULTA', 'DKS', 'BBY', 'BBWI',
+            'NKE',   # Nike - Labor ESG, very high Reddit coverage
+            'SBUX',  # Starbucks - Labor issues, high Reddit coverage
 
-            # Industrials
+            # === INDUSTRIALS (Airlines, ESG-sensitive) ===
             'DAL', 'UAL', 'AAL', 'LUV', 'JBLU', 'CARR', 'OTIS', 'XYL',
             'IEX', 'FTV', 'VLTO', 'EME', 'J', 'GNRC',
+            'BA',    # Boeing - Safety ESG, very high Reddit coverage
+            'CAT',   # Caterpillar - Industrial ESG, good coverage
 
-            # Real Estate (ESG-sensitive)
+            # === REAL ESTATE (ESG-sensitive) ===
             'INVH', 'EQR', 'AVB', 'ESS', 'MAA', 'UDR', 'CPT', 'AIV',
 
-            # Healthcare
+            # === HEALTHCARE (Reddit-popular) ===
             'PODD', 'HOLX', 'ALGN', 'IDXX', 'TECH', 'BAX', 'POOL',
+            'PFE',   # Pfizer - Pharma ESG, high Reddit coverage
+            'JNJ',   # J&J - Product safety ESG, high coverage
+            'UNH',   # UnitedHealth - Healthcare ESG, good coverage
 
-            # Technology
+            # === TECHNOLOGY (High Reddit coverage) ===
             'PANW', 'CRWD', 'ZS', 'DDOG', 'NET', 'SNOW', 'PLTR', 'U',
+            'CRM',   # Salesforce - ESG leader, good Reddit coverage
+            'COIN',  # Coinbase - Crypto ESG, very high Reddit coverage
 
-            # Utilities (high ESG exposure)
-            'AES', 'NRG', 'CMS', 'AEE', 'EVRG', 'LNT', 'NI', 'PNW'
+            # === UTILITIES (High ESG exposure) ===
+            'AES', 'NRG', 'CMS', 'AEE', 'EVRG', 'LNT', 'NI', 'PNW',
+            'NEE',   # NextEra - Clean energy leader, good coverage
+
+            # === FINANCIAL (ESG-sensitive, good coverage) ===
+            'JPM',   # JPMorgan - ESG financing, high Reddit coverage
+            'BAC',   # Bank of America - ESG investing, good coverage
+            'GS',    # Goldman Sachs - ESG controversies, good coverage
+            'BLK',   # BlackRock - ESG investing leader, good coverage
         ]
 
         print(f"Using minimal hardcoded list: {len(tickers)} mid-cap tickers")

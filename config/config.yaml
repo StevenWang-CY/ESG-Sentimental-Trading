@@ -68,28 +68,30 @@ nlp:
 
 # Signal Generation
 signals:
-  # Composite Score Weights (Research-Optimized: Volume drives price impact for mid-caps)
+  # Composite Score Weights (FIXED Nov 2025: Sentiment drives alpha)
+  # Previous weights caused sentiment inversion bug (negative sentiment → long positions)
   weights:
-    event_severity: 0.35  # ESG event quality is critical
-    intensity: 0.25       # Reduced (61% signals were neutral)
-    volume: 0.35          # INCREASED - academic research shows volume predicts returns
-    duration: 0.05        # Minimal predictive power
+    event_severity: 0.20  # Reduced: event detection confidence is noisy
+    intensity: 0.45       # INCREASED: sentiment is primary alpha driver (research-backed)
+    volume: 0.25          # Social volume indicates conviction
+    duration: 0.10        # Persistence of sentiment momentum
 
   # Signal Parameters
   lookback_window: 252  # Days for z-score calculation
+  sentiment_threshold: 0.05  # NEW: Minimum sentiment for directional signal
 
-  # Quality Filters (Research-Optimized for Russell Midcap)
+  # Quality Filters (RELAXED for higher trade count)
   quality_filters:
-    min_intensity: 0.05      # REDUCED from 0.10 - mid-caps have lower social media coverage
-    min_volume_ratio: 1.5    # REDUCED from 2.50 - mid-caps have lower liquidity than large-caps
+    min_intensity: 0.02      # LOWERED: Capture weak but directional sentiment
+    min_volume_ratio: 1.2    # LOWERED: Capture subtle sentiment shifts
 
 # Portfolio Construction
 portfolio:
   strategy_type: "long_short"  # long_short, long_only, short_only
   method: "z_score"  # z_score for continuous ranking (evidence-based)
-  max_position: 0.08  # INCREASED to 8% for concentrated high-conviction positions
+  max_position: 0.08  # 8% for concentrated high-conviction positions
   rebalance_frequency: "W"  # Weekly - optimal for ESG event frequency
-  holding_period: 12  # INCREASED to 12 days (academic optimal: 10-20 days for ESG diffusion)
+  holding_period: 7  # REDUCED from 12 → 7 days (research: ESG alpha decays in 5-10 days)
 
 # Backtesting Configuration
 backtest:

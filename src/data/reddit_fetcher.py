@@ -36,6 +36,69 @@ class RedditFetcher:
         self.use_mock = use_mock
         self.reddit = None
 
+        # TICKER TO COMPANY NAME MAPPING for fallback searches
+        # When ticker search returns 0 posts, try company name
+        # EXPANDED: 70+ mappings including high-Reddit-coverage large-caps
+        self.ticker_to_company = {
+            # HIGH REDDIT COVERAGE LARGE-CAPS (these get most posts)
+            'AAPL': 'Apple', 'MSFT': 'Microsoft', 'GOOGL': 'Google Alphabet',
+            'AMZN': 'Amazon', 'TSLA': 'Tesla', 'META': 'Meta Facebook',
+            'NVDA': 'Nvidia', 'AMD': 'AMD', 'INTC': 'Intel',
+
+            # ENERGY (High ESG + Reddit coverage)
+            'XOM': 'Exxon Mobil', 'CVX': 'Chevron', 'COP': 'ConocoPhillips',
+            'BP': 'BP British Petroleum', 'SHEL': 'Shell',
+            'DVN': 'Devon Energy', 'FANG': 'Diamondback Energy', 'OXY': 'Occidental',
+            'CTRA': 'Coterra Energy', 'MPC': 'Marathon Petroleum',
+            'VLO': 'Valero', 'PSX': 'Phillips 66',
+
+            # MATERIALS
+            'NUE': 'Nucor', 'STLD': 'Steel Dynamics', 'CLF': 'Cleveland Cliffs',
+            'AA': 'Alcoa', 'X': 'US Steel', 'FCX': 'Freeport McMoRan',
+            'NEM': 'Newmont Mining',
+
+            # CONSUMER (High Reddit coverage)
+            'NKE': 'Nike', 'SBUX': 'Starbucks', 'MGM': 'MGM Resorts',
+            'WYNN': 'Wynn Resorts', 'LVS': 'Las Vegas Sands', 'CCL': 'Carnival',
+            'NCLH': 'Norwegian Cruise', 'RCL': 'Royal Caribbean',
+            'TPR': 'Tapestry Coach', 'LULU': 'Lululemon', 'ULTA': 'Ulta Beauty',
+            'DKS': "Dick's Sporting", 'BBY': 'Best Buy', 'BBWI': 'Bath Body Works',
+
+            # AIRLINES/INDUSTRIALS
+            'DAL': 'Delta Airlines', 'UAL': 'United Airlines',
+            'AAL': 'American Airlines', 'LUV': 'Southwest Airlines',
+            'BA': 'Boeing', 'CAT': 'Caterpillar',
+            'CARR': 'Carrier', 'OTIS': 'Otis Elevator', 'XYL': 'Xylem',
+            'IEX': 'IDEX', 'FTV': 'Fortive', 'VLTO': 'Veralto', 'EME': 'EMCOR',
+            'J': 'Jacobs', 'GNRC': 'Generac',
+
+            # REAL ESTATE
+            'INVH': 'Invitation Homes', 'EQR': 'Equity Residential',
+            'AVB': 'AvalonBay', 'MAA': 'Mid-America Apartment',
+            'UDR': 'UDR', 'CPT': 'Camden Property',
+
+            # HEALTHCARE (Reddit-popular)
+            'PFE': 'Pfizer', 'JNJ': 'Johnson Johnson', 'UNH': 'UnitedHealth',
+            'TECH': 'Bio-Techne', 'PKI': 'PerkinElmer',
+            'WST': 'West Pharmaceutical', 'HOLX': 'Hologic',
+
+            # TECH (High Reddit coverage)
+            'CRM': 'Salesforce', 'COIN': 'Coinbase', 'PLTR': 'Palantir',
+            'PANW': 'Palo Alto Networks', 'CRWD': 'CrowdStrike',
+            'ZS': 'Zscaler', 'DDOG': 'Datadog', 'NET': 'Cloudflare',
+            'SNOW': 'Snowflake', 'U': 'Unity',
+
+            # UTILITIES (ESG-sensitive)
+            'NEE': 'NextEra Energy', 'AES': 'AES Corporation',
+            'AEE': 'Ameren', 'LNT': 'Alliant Energy', 'PNW': 'Pinnacle West',
+            'NI': 'NiSource', 'EVRG': 'Evergy', 'NRG': 'NRG Energy',
+            'CMS': 'CMS Energy',
+
+            # FINANCIALS (ESG-sensitive, good coverage)
+            'JPM': 'JPMorgan', 'BAC': 'Bank of America',
+            'GS': 'Goldman Sachs', 'BLK': 'BlackRock'
+        }
+
         # Default subreddits for ESG/stock discussions
         # EXPANDED: Added 8 more ESG-focused communities for 5-10x coverage
         self.esg_subreddits = [
@@ -139,7 +202,10 @@ class RedditFetcher:
 
             # Use only the most effective search strategy: 'relevance' (best quality/speed tradeoff)
             search_strategy = 'relevance'
-            time_filter = 'all'
+            # FIX: Use 'year' instead of 'all' to get denser results within event window
+            # 'all' returns posts spanning 10+ years, wasting 95% of API results
+            # 'year' focuses on recent posts, dramatically improving hit rate
+            time_filter = 'year'
 
             seen_post_ids = set()  # Deduplicate across subreddits
 
@@ -150,9 +216,9 @@ class RedditFetcher:
                 try:
                     subreddit = self.reddit.subreddit(subreddit_name)
 
-                    # OPTIMIZED: Lower search limit (200 instead of 500-1000)
-                    # Most relevant posts appear in first 200 results
-                    search_limit = min(200, posts_per_sub * 3)
+                    # INCREASED: Fetch more posts to improve date match rate
+                    # With 'year' filter, posts are denser around event dates
+                    search_limit = min(500, posts_per_sub * 5)
 
                     try:
                         for submission in subreddit.search(query, limit=search_limit, sort=search_strategy, time_filter=time_filter):
@@ -172,9 +238,9 @@ class RedditFetcher:
                                 except:
                                     author_karma = 0
 
-                                # QUALITY FILTER: Minimum engagement thresholds
-                                # Skip low-quality spam posts (upvotes < 2, karma < 50)
-                                if submission.score < 2 or author_karma < 50:
+                                # QUALITY FILTER: RELAXED thresholds for higher coverage
+                                # Skip obvious spam (upvotes < 1, karma < 25)
+                                if submission.score < 1 or author_karma < 25:
                                     continue
 
                                 posts_data.append({
@@ -201,6 +267,48 @@ class RedditFetcher:
                 except Exception as e:
                     print(f"Warning: Error accessing r/{subreddit_name}: {e}")
                     continue
+
+            # FALLBACK: If no posts found with ticker, try company name
+            if not posts_data and ticker in self.ticker_to_company:
+                company_name = self.ticker_to_company[ticker]
+                print(f"  Trying company name fallback: '{company_name}'...")
+
+                for subreddit_name in priority_subreddits[:3]:  # Search top 3 subs with company name
+                    try:
+                        subreddit = self.reddit.subreddit(subreddit_name)
+                        for submission in subreddit.search(company_name, limit=300, sort='relevance', time_filter='year'):
+                            if submission.id in seen_post_ids:
+                                continue
+                            seen_post_ids.add(submission.id)
+
+                            post_time = datetime.fromtimestamp(submission.created_utc)
+                            if start_time <= post_time <= end_time:
+                                try:
+                                    author_karma = submission.author.link_karma + submission.author.comment_karma if submission.author else 0
+                                except:
+                                    author_karma = 0
+
+                                # RELAXED quality filter for company name search
+                                if submission.score < 1 or author_karma < 25:
+                                    continue
+
+                                posts_data.append({
+                                    'timestamp': post_time,
+                                    'text': f"{submission.title} {submission.selftext}"[:500],
+                                    'user_followers': author_karma,
+                                    'retweets': submission.num_comments,
+                                    'likes': submission.score,
+                                    'ticker': ticker,
+                                    'subreddit': subreddit_name
+                                })
+
+                                if len(posts_data) >= max_results:
+                                    break
+                    except Exception as e:
+                        continue
+
+                if posts_data:
+                    print(f"  ✓ Found {len(posts_data)} posts via company name '{company_name}'")
 
             if not posts_data:
                 print(f"No Reddit posts found for {ticker} around {event_date}")
