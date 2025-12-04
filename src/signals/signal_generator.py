@@ -33,6 +33,7 @@ class ESGSignalGenerator:
             'intensity': 0.45,       # PRIMARY: Mean sentiment magnitude
             'volume': 0.25,          # Social conviction
             'duration': 0.10,        # Persistence
+            'sentiment_volume_momentum': 0.20, # NEW: Research-backed SVC metric
             # NEW: Research-backed enhancements (optional, set to 0 to disable)
             'max_sentiment': 0.0,    # Maximum sentiment (MDPI 2025)
             'polarization': 0.0      # Sentiment disagreement (std)
@@ -86,6 +87,13 @@ class ESGSignalGenerator:
         polarization = reaction_features.get('polarization', 0.0)
         polarization_normalized = min(polarization, 1.0)  # Already in [0, 1] range
 
+        # 7. NEW: Sentiment Volume Momentum (SVC Metric)
+        # Combines sentiment direction with volume conviction
+        # Formula: intensity * volume_normalized (Range: [-1, 1])
+        # Normalized to [0, 1] for scoring
+        momentum_proxy = intensity_raw * volume_normalized
+        momentum_normalized = (momentum_proxy + 1.0) / 2.0
+
         # Compute weighted sum (new features have default weight 0)
         raw_score = (
             self.weights.get('event_severity', 0.20) * event_severity +
@@ -93,7 +101,8 @@ class ESGSignalGenerator:
             self.weights.get('volume', 0.25) * volume_normalized +
             self.weights.get('duration', 0.10) * duration_normalized +
             self.weights.get('max_sentiment', 0.0) * max_sentiment_normalized +
-            self.weights.get('polarization', 0.0) * polarization_normalized
+            self.weights.get('polarization', 0.0) * polarization_normalized +
+            self.weights.get('sentiment_volume_momentum', 0.0) * momentum_normalized
         )
 
         return raw_score

@@ -800,6 +800,50 @@ def render_validation_checklist(data):
         st.success("✅ No red flags detected")
 
 
+def render_live_logs(log_file_path="./logs/esg_strategy.log"):
+    """
+    Section F: Live Execution Logs
+    """
+    st.header("📝 Section F: Live Execution Logs")
+    
+    log_path = Path(log_file_path)
+    
+    if not log_path.exists():
+        st.warning(f"Log file not found at {log_path}")
+        return
+
+    # Add auto-refresh checkbox
+    if st.checkbox("Auto-refresh logs (5s)", value=True):
+        import time
+        time.sleep(5)
+        st.rerun()
+
+    try:
+        # Read last 50 lines
+        with open(log_path, "r") as f:
+            lines = f.readlines()
+            last_lines = lines[-50:]
+            log_content = "".join(last_lines)
+            
+        st.text_area("Tail of esg_strategy.log", log_content, height=400)
+        
+        # Parse progress if possible
+        if "Downloading filings" in log_content:
+            st.info("🔄 Status: Downloading SEC Filings...")
+        elif "FETCHING PRICE DATA" in log_content:
+            st.info("🔄 Status: Fetching Price Data...")
+        elif "EVENT DETECTION" in log_content:
+            st.info("🔄 Status: Detecting ESG Events...")
+        elif "SIGNAL GENERATION" in log_content:
+            st.info("🔄 Status: Generating Signals...")
+        elif "BACKTESTING" in log_content:
+            st.info("🔄 Status: Running Backtest...")
+            
+    except Exception as e:
+        st.error(f"Error reading log file: {e}")
+
+
+
 def main():
     """Main dashboard application"""
 
@@ -877,6 +921,11 @@ def main():
 
     # Section E: Validation Checklist
     render_validation_checklist(data)
+
+    st.markdown("---")
+
+    # Section F: Live Logs
+    render_live_logs()
 
     # Footer
     st.markdown("---")

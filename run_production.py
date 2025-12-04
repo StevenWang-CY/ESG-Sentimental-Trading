@@ -399,7 +399,7 @@ def main():
             logger.info("Config changed - re-detecting events with new parameters")
 
         # Initialize NLP components
-        parser = SECFilingParser()
+        filing_parser = SECFilingParser()
         text_cleaner = TextCleaner()
         event_detector = ESGEventDetector()
         sentiment_analyzer = FinancialSentimentAnalyzer()
@@ -430,117 +430,126 @@ def main():
 
         events_data = []
 
-    # FIX 1.2: Defensive date filtering (second layer of defense)
-    # Filter out any filings that somehow got through with wrong dates
-    original_count = len(all_filings)
-    start_dt = datetime.strptime(args.start_date, '%Y-%m-%d')
-    end_dt = datetime.strptime(args.end_date, '%Y-%m-%d')
+        # FIX 1.2: Defensive date filtering (second layer of defense)
+        # Filter out any filings that somehow got through with wrong dates
+        original_count = len(all_filings)
+        start_dt = datetime.strptime(args.start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(args.end_date, '%Y-%m-%d')
 
-    valid_filings = []
-    filtered_out = []
+        valid_filings = []
+        filtered_out = []
 
-    for filing in all_filings:
-        try:
-            filing_date = datetime.strptime(filing.get('date', args.start_date), '%Y-%m-%d')
+        for filing in all_filings:
+            try:
+                filing_date = datetime.strptime(filing.get('date', args.start_date), '%Y-%m-%d')
 
-            if start_dt <= filing_date <= end_dt:
-                valid_filings.append(filing)
-            else:
-                filtered_out.append((filing['ticker'], filing.get('date', 'UNKNOWN')))
-        except ValueError as e:
-            logger.warning(f"⚠ Invalid date format in filing: {filing.get('date')}")
-            filtered_out.append((filing['ticker'], filing.get('date', 'INVALID')))
-
-    # Log filtering statistics
-    filtered_count = len(filtered_out)
-    if filtered_count > 0:
-        logger.warning(f"⚠ Filtered {filtered_count}/{original_count} filings outside date range:")
-        for ticker, date in filtered_out[:5]:  # Show first 5
-            logger.warning(f"  - {ticker}: {date}")
-        if filtered_count > 5:
-            logger.warning(f"  ... and {filtered_count - 5} more")
-
-        # Alert if >10% filtered (indicates upstream bug)
-        if filtered_count / original_count > 0.10:
-            logger.error(f"⚠⚠⚠ WARNING: {filtered_count/original_count*100:.1f}% of filings were outside date range!")
-            logger.error(f"    This suggests the SEC downloader may not be filtering correctly.")
-            logger.error(f"    Expected: {args.start_date} to {args.end_date}")
-
-    all_filings = valid_filings  # Replace with filtered list
-    logger.info(f"Valid filings for event detection: {len(all_filings)}")
-
-    for i, filing in enumerate(all_filings):
-        logger.info(f"Processing filing {i+1}/{len(all_filings)}: {filing['ticker']}...")
-
-        try:
-            # Extract and clean text
-            if 'text' in filing:
-                text = filing['text']
-            else:
-                text = parser.extract_text(filing['file_path'])
-
-            text = text_cleaner.clean_for_sentiment_analysis(text)
-
-            # Detect ESG events
-            event_result = event_detector.detect_event(text)
-
-            if event_result['has_event']:
-                logger.info(f"  ✓ ESG Event detected: {event_result['category']} "
-                          f"(confidence: {event_result['confidence']:.2f})")
-
-                # Fetch social media data
-                event_date = datetime.strptime(filing.get('date', args.start_date), '%Y-%m-%d')
-
-                # Build per-event cache for social media posts
-                days_before = social_media_config.get('days_before_event', 3)
-                days_after = social_media_config.get('days_after_event', 7)
-                max_results = social_media_config.get('max_posts_per_ticker', 100)
-
-                social_cache_dir = Path('data/social_media')
-                social_cache_dir.mkdir(parents=True, exist_ok=True)
-                social_cache_file = social_cache_dir / f"{social_source}_{filing['ticker']}_{event_date.date()}_d{days_before}_{days_after}_max{max_results}.pkl"
-
-                # Try to load from cache
-                if social_cache_file.exists() and args.use_cache and not args.force_refresh:
-                    logger.info(f"  ✓ Loading cached {source_name} data from {social_cache_file.name}")
-                    posts_df = pd.read_pickle(social_cache_file)
+                if start_dt <= filing_date <= end_dt:
+                    valid_filings.append(filing)
                 else:
-                    # Fetch from API
-                    logger.info(f"  Fetching {source_name} data around {event_date.date()}...")
-                    posts_df = social_media_fetcher.fetch_tweets_for_event(
-                        ticker=filing['ticker'],
-                        event_date=event_date,
-                        keywords=social_media_config.get('esg_keywords', []),
-                        days_before=days_before,
-                        days_after=days_after,
-                        max_results=max_results
-                    )
+                    filtered_out.append((filing['ticker'], filing.get('date', 'UNKNOWN')))
+            except ValueError as e:
+                logger.warning(f"⚠ Invalid date format in filing: {filing.get('date')}")
+                filtered_out.append((filing['ticker'], filing.get('date', 'INVALID')))
 
-                    # Save to cache
-                    if args.save_data or args.use_cache:
-                        posts_df.to_pickle(social_cache_file)
+        # Log filtering statistics
+        filtered_count = len(filtered_out)
+        if filtered_count > 0:
+            logger.warning(f"⚠ Filtered {filtered_count}/{original_count} filings outside date range:")
+            for ticker, date in filtered_out[:5]:  # Show first 5
+                logger.warning(f"  - {ticker}: {date}")
+            if filtered_count > 5:
+                logger.warning(f"  ... and {filtered_count - 5} more")
 
-                if posts_df.empty:
-                    logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}")
-                    continue
+            # Alert if >10% filtered (indicates upstream bug)
+            if filtered_count / original_count > 0.10:
+                logger.error(f"⚠⚠⚠ WARNING: {filtered_count/original_count*100:.1f}% of filings were outside date range!")
+                logger.error(f"    This suggests the SEC downloader may not be filtering correctly.")
+                logger.error(f"    Expected: {args.start_date} to {args.end_date}")
 
-                # Extract reaction features
-                reaction_features = feature_extractor.extract_features(posts_df, event_date)
+        all_filings = valid_filings  # Replace with filtered list
+        logger.info(f"Valid filings for event detection: {len(all_filings)}")
 
-                logger.info(f"  Posts: {reaction_features['n_tweets']}, "
-                          f"Intensity: {reaction_features['intensity']:.3f}, "
-                          f"Volume: {reaction_features['volume_ratio']:.2f}x")
+        for i, filing in enumerate(all_filings):
+            logger.info(f"Processing filing {i+1}/{len(all_filings)}: {filing['ticker']}...")
 
-                events_data.append({
-                    'ticker': filing['ticker'],
-                    'date': event_date,
-                    'event_features': event_result,
-                    'reaction_features': reaction_features
-                })
+            try:
+                # Extract and clean text
+                if 'text' in filing:
+                    text = filing['text']
+                else:
+                    text = filing_parser.extract_text(filing['file_path'])
 
-        except Exception as e:
-            logger.error(f"  Error processing filing: {e}")
-            continue
+                text = text_cleaner.clean_for_sentiment_analysis(text)
+
+                # Detect ESG events
+                event_result = event_detector.detect_event(text)
+
+                if event_result['has_event']:
+                    logger.info(f"  ✓ ESG Event detected: {event_result['category']} "
+                              f"(confidence: {event_result['confidence']:.2f})")
+
+                    # Fetch social media data
+                    event_date = datetime.strptime(filing.get('date', args.start_date), '%Y-%m-%d')
+
+                    # Build per-event cache for social media posts
+                    days_before = social_media_config.get('days_before_event', 3)
+                    days_after = social_media_config.get('days_after_event', 7)
+                    max_results = social_media_config.get('max_posts_per_ticker', 100)
+
+                    social_cache_dir = Path('data/social_media')
+                    social_cache_dir.mkdir(parents=True, exist_ok=True)
+                    social_cache_file = social_cache_dir / f"{social_source}_{filing['ticker']}_{event_date.date()}_d{days_before}_{days_after}_max{max_results}.pkl"
+
+                    # Try to load from cache
+                    if social_cache_file.exists() and args.use_cache and not args.force_refresh:
+                        logger.info(f"  ✓ Loading cached {source_name} data from {social_cache_file.name}")
+                        posts_df = pd.read_pickle(social_cache_file)
+                    else:
+                        # Fetch from API
+                        logger.info(f"  Fetching {source_name} data around {event_date.date()}...")
+                        posts_df = social_media_fetcher.fetch_tweets_for_event(
+                            ticker=filing['ticker'],
+                            event_date=event_date,
+                            keywords=social_media_config.get('esg_keywords', []),
+                            days_before=days_before,
+                            days_after=days_after,
+                            max_results=max_results
+                        )
+
+                        # Save to cache
+                        if args.save_data or args.use_cache:
+                            posts_df.to_pickle(social_cache_file)
+
+                    # Extract reaction features (handle missing Reddit data gracefully)
+                    if posts_df.empty:
+                        logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}, using neutral sentiment")
+                        # Use neutral/default reaction features when no social media data available
+                        reaction_features = {
+                            'intensity': 0.0,  # Neutral sentiment
+                            'volume_ratio': 1.0,  # Baseline volume
+                            'duration_days': 0,  # No reaction duration
+                            'n_tweets': 0,  # No posts
+                            'max_sentiment': 0.0,  # Neutral
+                            'polarization': 0.0  # No disagreement
+                        }
+                    else:
+                        # Extract features from available social media data
+                        reaction_features = feature_extractor.extract_features(posts_df, event_date)
+
+                    logger.info(f"  Posts: {reaction_features['n_tweets']}, "
+                              f"Intensity: {reaction_features['intensity']:.3f}, "
+                              f"Volume: {reaction_features['volume_ratio']:.2f}x")
+
+                    events_data.append({
+                        'ticker': filing['ticker'],
+                        'date': event_date,
+                        'event_features': event_result,
+                        'reaction_features': reaction_features
+                    })
+
+            except Exception as e:
+                logger.error(f"  Error processing filing: {e}")
+                continue
 
         logger.info(f"\nDetected {len(events_data)} ESG events with {source_name} reactions")
 

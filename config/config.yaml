@@ -20,8 +20,8 @@ data:
   social_media:
     source: "reddit"  # "reddit" or "twitter"
     max_posts_per_ticker: 300  # INCREASED to 300 for richer sentiment data (revised strategy)
-    days_before_event: 3  # RESTORED to 3 - event-proximate window (captures acute reaction)
-    days_after_event: 7  # RESTORED to 7 - optimal for ESG sentiment diffusion
+    days_before_event: 5  # INCREASED to 5 - capture pre-event leakage (research-backed)
+    days_after_event: 10  # INCREASED to 10 - capture full diffusion cycle
     esg_keywords:  # ESG-related keywords (currently ignored - see reddit_fetcher.py)
       - "ESG"
       - "climate"
@@ -72,10 +72,11 @@ signals:
   # Composite Score Weights (FIXED Nov 2025: Sentiment drives alpha)
   # Previous weights caused sentiment inversion bug (negative sentiment → long positions)
   weights:
-    event_severity: 0.20  # Reduced: event detection confidence is noisy
-    intensity: 0.45       # INCREASED: sentiment is primary alpha driver (research-backed)
-    volume: 0.25          # Social volume indicates conviction
-    duration: 0.10        # Persistence of sentiment momentum
+    event_severity: 0.15  # Reduced to make room for momentum
+    intensity: 0.35       # High weight, but balanced with momentum
+    volume: 0.20          # Volume is important, but momentum captures the interaction
+    duration: 0.10        # Persistence
+    sentiment_volume_momentum: 0.20 # NEW: Research-backed SVC metric (Sentiment * Volume Change)
 
   # Signal Parameters
   lookback_window: 252  # Days for z-score calculation
@@ -83,8 +84,8 @@ signals:
 
   # Quality Filters (RELAXED for higher trade count)
   quality_filters:
-    min_intensity: 0.02      # LOWERED: Capture weak but directional sentiment
-    min_volume_ratio: 1.2    # LOWERED: Capture subtle sentiment shifts
+    min_intensity: 0.05      # INCREASED: Research shows "extreme" sentiment drives alpha
+    min_volume_ratio: 1.2    # Keep volume ratio to capture subtle shifts
 
 # Portfolio Construction
 portfolio:
