@@ -44,13 +44,20 @@ class PortfolioConstructor:
         else:
             raise ValueError(f"Unknown method: {method}")
 
-    def _quintile_portfolio(self, signals_df: pd.DataFrame) -> pd.DataFrame:
+    def _quintile_portfolio(self, signals_df: pd.DataFrame,
+                            balance_long_short: bool = True) -> pd.DataFrame:
         """
         Classic quintile approach: Long Q5, Short Q1
         CRITICAL: Weights are assigned PER DATE (not globally)
 
+        ROOT CAUSE FIX (Dec 2025):
+        - Unbalanced long/short (61 long vs 109 short) caused systematic short bias
+        - Now balances positions to ensure true market neutrality
+        - Takes min(n_long, n_short) positions from each side
+
         Args:
             signals_df: Signals DataFrame
+            balance_long_short: If True, ensure equal number of longs and shorts
 
         Returns:
             Portfolio weights DataFrame
@@ -58,8 +65,6 @@ class PortfolioConstructor:
         signals_df = signals_df.copy()
 
         # CRITICAL FIX: Group by date and assign weights within each date
-        # Previously assigned global weights (e.g., 13 longs across all dates → 1/13 each)
-        # Now assigns weights per rebalance date (e.g., 2 longs on 2024-08-01 → 1/2 each)
         portfolio_list = []
 
         for date, group in signals_df.groupby('date'):
@@ -67,10 +72,33 @@ class PortfolioConstructor:
             long_stocks = group[group['quintile'] == 5].copy()
             short_stocks = group[group['quintile'] == 1].copy()
 
-            # Calculate equal weights FOR THIS DATE ONLY
             n_long = len(long_stocks)
             n_short = len(short_stocks)
 
+            # ROOT CAUSE FIX #4: Balance long/short positions
+            # Academic basis: Market-neutral requires equal long/short exposure
+            # Imbalanced portfolios have unintended market beta
+            if balance_long_short and self.strategy_type == 'long_short':
+                n_positions = min(n_long, n_short)
+
+                if n_positions == 0:
+                    # Skip this date if we can't balance
+                    continue
+
+                # Sort by confidence/signal strength and take top N from each side
+                if 'confidence' in long_stocks.columns:
+                    long_stocks = long_stocks.nlargest(n_positions, 'confidence')
+                    short_stocks = short_stocks.nlargest(n_positions, 'confidence')
+                elif 'raw_score' in long_stocks.columns:
+                    long_stocks = long_stocks.nlargest(n_positions, 'raw_score')
+                    short_stocks = short_stocks.nsmallest(n_positions, 'raw_score')
+                else:
+                    long_stocks = long_stocks.head(n_positions)
+                    short_stocks = short_stocks.head(n_positions)
+
+                n_long = n_short = n_positions
+
+            # Calculate equal weights FOR THIS DATE ONLY
             if n_long > 0:
                 long_stocks['weight'] = 1.0 / n_long
             if n_short > 0:
@@ -86,11 +114,21 @@ class PortfolioConstructor:
             else:
                 date_portfolio = pd.concat([long_stocks, short_stocks])
 
-            portfolio_list.append(date_portfolio)
+            if not date_portfolio.empty:
+                portfolio_list.append(date_portfolio)
 
         # Combine all dates
         if portfolio_list:
             portfolio = pd.concat(portfolio_list)
+
+            # Log balance statistics
+            long_count = (portfolio['weight'] > 0).sum()
+            short_count = (portfolio['weight'] < 0).sum()
+            print(f"\n📊 Portfolio Balance (after balancing):")
+            print(f"  Long positions: {long_count}")
+            print(f"  Short positions: {short_count}")
+            print(f"  Balance ratio: {long_count/max(short_count,1):.2f}x")
+
             return portfolio[['ticker', 'date', 'weight']].reset_index(drop=True)
         else:
             # Return empty DataFrame with correct columns (no Q1 or Q5 signals found)

@@ -102,6 +102,13 @@ class BacktestEngine:
         else:
             all_dates = sorted(self.prices.index.unique())
 
+        # CRITICAL FIX: Remove NaT values which can break date comparison
+        all_dates = [d for d in all_dates if pd.notna(d)]
+        
+        if not all_dates:
+            print("ERROR: No valid dates in price data.")
+            return self._create_empty_result()
+
         # CRITICAL FIX: Filter signals to only include dates within price data range
         # This prevents 0 trades when signals exist outside backtest window
         price_start = all_dates[0]

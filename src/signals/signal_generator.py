@@ -289,12 +289,21 @@ class ESGSignalGenerator:
 
         return signals_df
 
-    def generate_signals_batch(self, events_data: List[Dict]) -> pd.DataFrame:
+    def generate_signals_batch(self, events_data: List[Dict],
+                                min_posts: int = 5,
+                                require_social_data: bool = True) -> pd.DataFrame:
         """
-        Generate signals for multiple events
+        Generate signals for multiple events with quality filtering.
+
+        ROOT CAUSE FIX (Dec 2025):
+        - Events WITHOUT social media data were creating noise signals
+        - Fallback sentiment (-0.5, 0, +0.5) caused bimodal quintile distribution
+        - Now requires actual social media validation for trading signals
 
         Args:
             events_data: List of dictionaries with event and reaction data
+            min_posts: Minimum number of social media posts required (default: 5)
+            require_social_data: If True, exclude events without social data (default: True)
 
         Returns:
             DataFrame with all signals
@@ -302,31 +311,82 @@ class ESGSignalGenerator:
         signals = []
 
         for event_data in events_data:
+            # Extract post count from reaction features
+            n_posts = event_data['reaction_features'].get('n_tweets', 0)
+
             signal = self.compute_signal(
                 ticker=event_data['ticker'],
                 date=event_data['date'],
                 event_features=event_data['event_features'],
                 reaction_features=event_data['reaction_features']
             )
+            # Add post count and confidence score to signal
+            signal['n_posts'] = n_posts
+            signal['has_social_data'] = n_posts > 0
+
+            # Compute signal confidence (higher with more posts and stronger sentiment)
+            sentiment_strength = abs(signal['sentiment_intensity'])
+            volume_boost = min(signal['volume_ratio'] / 2.0, 1.0)  # Cap at 2x
+            post_confidence = min(n_posts / 50.0, 1.0)  # Cap at 50 posts
+            signal['confidence'] = (0.4 * sentiment_strength + 0.3 * volume_boost + 0.3 * post_confidence)
+
             signals.append(signal)
 
         df_signals = pd.DataFrame(signals)
 
-        # FIX 2.1: Apply cross-sectional ranking AFTER all signals are generated
-        # This ensures proper quintile assignment for market-neutral portfolios
+        if df_signals.empty:
+            return df_signals
+
+        print(f"\n📊 Signal Quality Filters (Research-Backed):")
+        print(f"  Total events detected: {len(df_signals)}")
+
+        # ROOT CAUSE FIX #1: Separate events by social media coverage
+        has_social = df_signals['has_social_data'] == True
+        events_with_social = df_signals[has_social].copy()
+        events_without_social = df_signals[~has_social].copy()
+
+        print(f"  Events WITH social data: {len(events_with_social)}")
+        print(f"  Events WITHOUT social data: {len(events_without_social)}")
+
+        # ROOT CAUSE FIX #2: Exclude events without social data from trading
+        # Academic basis: Social sentiment is the primary alpha driver (45% weight)
+        # Without social validation, the signal is noise, not signal
+        if require_social_data:
+            print(f"  ⚠ EXCLUDING {len(events_without_social)} events without social media data")
+            print(f"    (Research: social sentiment drives alpha; fallback values add noise)")
+            df_signals = events_with_social.copy()
+
+        if df_signals.empty:
+            print(f"  ⚠ No events with social data. Cannot generate trading signals.")
+            return pd.DataFrame()
+
+        # ROOT CAUSE FIX #3: Apply minimum post count filter
+        # Academic basis: Sentiment from <5 posts is statistically unreliable
+        before_post_filter = len(df_signals)
+        df_signals = df_signals[df_signals['n_posts'] >= min_posts].copy()
+        print(f"  Events after min_posts filter (≥{min_posts}): {len(df_signals)} (removed {before_post_filter - len(df_signals)})")
+
+        if df_signals.empty:
+            print(f"  ⚠ No events with sufficient posts. Try lowering min_posts threshold.")
+            return pd.DataFrame()
+
+        # Apply volume and sentiment filters
+        before_volume = len(df_signals)
+        df_signals = self.filter_by_volume(df_signals, min_volume_ratio=1.2)
+        print(f"  Events after volume filter (≥1.2x): {len(df_signals)} (removed {before_volume - len(df_signals)})")
+
+        before_sentiment = len(df_signals)
+        df_signals = self.filter_by_sentiment(df_signals, min_abs_intensity=0.05)
+        print(f"  Events after sentiment filter (|intensity|≥0.05): {len(df_signals)} (removed {before_sentiment - len(df_signals)})")
+
+        if df_signals.empty:
+            print(f"  ⚠ All events filtered out. Consider relaxing thresholds.")
+            return pd.DataFrame()
+
+        # FIX 2.1: Apply cross-sectional ranking AFTER filtering
         df_signals = self._apply_cross_sectional_ranking(df_signals)
 
-        # NEW: Apply quality filters (RELAXED to increase trade count per config)
-        print(f"\n📊 Signal Quality Filters (Config-Based - RELAXED):")
-        print(f"  Signals before filtering: {len(df_signals)}")
-
-        # Filter 1: Minimum volume ratio (1.2x per config quality_filters.min_volume_ratio)
-        df_signals = self.filter_by_volume(df_signals, min_volume_ratio=1.2)
-        print(f"  After volume filter (≥1.2x): {len(df_signals)}")
-
-        # Filter 2: Non-zero sentiment (|intensity| > 0.02 per config quality_filters.min_intensity)
-        df_signals = self.filter_by_sentiment(df_signals, min_abs_intensity=0.02)
-        print(f"  After sentiment filter (|intensity|>0.02): {len(df_signals)}")
+        print(f"  FINAL trading signals: {len(df_signals)}")
 
         # CRITICAL: Validate signal quality after generation
         self.validate_signal_quality(df_signals)

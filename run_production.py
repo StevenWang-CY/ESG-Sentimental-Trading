@@ -523,13 +523,43 @@ def main():
                     # Extract reaction features (handle missing Reddit data gracefully)
                     if posts_df.empty:
                         logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}, using neutral sentiment")
-                        # Use neutral/default reaction features when no social media data available
+                        # ADVANCED FALLBACK: Hybrid FinBERT + Keyword Sentiment
+                        # 1. Try FinBERT on relevant text
+                        # 2. If FinBERT is Neutral (0.0) but Keywords are Strong, use Keywords
+                        # This handles "boring legalese" that actually contains a negative event
+                        
+                        fallback_intensity = 0.0
+                        finbert_used = False
+                        
+                        if sentiment_analyzer:
+                            relevant_text = filing_parser.extract_esg_relevant_sections(text)
+                            filing_text_snippet = relevant_text[:1000] 
+                            sentiment_result = sentiment_analyzer.analyze_single(filing_text_snippet)
+                            finbert_score = sentiment_analyzer.score_to_numeric(sentiment_result)
+                            
+                            if abs(finbert_score) > 0.01:
+                                fallback_intensity = finbert_score
+                                finbert_used = True
+                                logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}, using FinBERT on filing text: {finbert_score:.3f}")
+                        
+                        # If FinBERT was neutral or unavailable, check event keywords
+                        if not finbert_used or abs(fallback_intensity) < 0.01:
+                            event_sentiment = event_result.get('sentiment', 'neutral')
+                            if event_sentiment == 'positive':
+                                fallback_intensity = 0.5
+                                logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}, FinBERT neutral, using event sentiment: {event_sentiment} ({fallback_intensity})")
+                            elif event_sentiment == 'negative':
+                                fallback_intensity = -0.5
+                                logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}, FinBERT neutral, using event sentiment: {event_sentiment} ({fallback_intensity})")
+                            elif finbert_used:
+                                logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}, FinBERT and Event both neutral")
+                        
                         reaction_features = {
-                            'intensity': 0.0,  # Neutral sentiment
+                            'intensity': fallback_intensity,
                             'volume_ratio': 1.0,  # Baseline volume
                             'duration_days': 0,  # No reaction duration
                             'n_tweets': 0,  # No posts
-                            'max_sentiment': 0.0,  # Neutral
+                            'max_sentiment': fallback_intensity,  # Use hybrid score
                             'polarization': 0.0  # No disagreement
                         }
                     else:
@@ -570,24 +600,36 @@ def main():
     # Step 6: Signal Generation
     logger.info("\n>>> STEP 6: SIGNAL GENERATION")
 
-    # Load quality filter thresholds from config (relaxed for Russell Midcap)
+    # Load quality filter thresholds from config (ROOT CAUSE FIX Dec 2025)
     quality_filters = config.get('signals', {}).get('quality_filters', {})
     min_intensity = quality_filters.get('min_intensity', 0.05)
-    min_volume_ratio = quality_filters.get('min_volume_ratio', 1.5)
+    min_volume_ratio = quality_filters.get('min_volume_ratio', 1.2)
+    min_posts = quality_filters.get('min_posts', 5)  # NEW: Minimum posts required
+    require_social_data = quality_filters.get('require_social_data', True)  # NEW: Require social validation
 
-    logger.info(f"Quality Filters (Russell Midcap optimized):")
-    logger.info(f"  Min intensity: {min_intensity} (vs 0.10 for large-caps)")
-    logger.info(f"  Min volume ratio: {min_volume_ratio}x (vs 2.50x for large-caps)")
+    logger.info(f"Quality Filters (ROOT CAUSE FIX - Dec 2025):")
+    logger.info(f"  Min intensity: {min_intensity}")
+    logger.info(f"  Min volume ratio: {min_volume_ratio}x")
+    logger.info(f"  Min posts: {min_posts} (excludes events with sparse social data)")
+    logger.info(f"  Require social data: {require_social_data} (excludes events without Reddit coverage)")
 
-    signal_generator = ESGSignalGenerator(
-        min_intensity=min_intensity,
-        min_volume_ratio=min_volume_ratio
+    signal_generator = ESGSignalGenerator()
+
+    # ROOT CAUSE FIX: Pass new quality parameters to signal generation
+    # This filters out noise signals from events without social media validation
+    signals_df = signal_generator.generate_signals_batch(
+        events_data,
+        min_posts=min_posts,
+        require_social_data=require_social_data
     )
 
-    # FIX 2.2: Use batch processing to apply cross-sectional ranking
-    # Previously called compute_signal() individually, which assigned Q3 to all sparse signals
-    # Now use generate_signals_batch() which applies cross-sectional ranking
-    signals_df = signal_generator.generate_signals_batch(events_data)
+    if signals_df.empty:
+        logger.warning("No trading signals generated after quality filtering.")
+        logger.info("Possible fixes:")
+        logger.info("  - Lower min_posts threshold in config")
+        logger.info("  - Set require_social_data: false (not recommended)")
+        logger.info("  - Expand Reddit search window")
+        return
 
     logger.info(f"Generated {len(signals_df)} trading signals")
     logger.info(f"Quintile distribution: {signals_df['quintile'].value_counts().sort_index().to_dict()}")
@@ -624,6 +666,9 @@ def main():
         logger.info(f"Saved portfolio to {portfolio_file}")
 
     # Step 8: Backtesting
+    logger.info("\n>>> STEP 8: BACKTESTING")
+    
+    # Run backtest
     logger.info("\n>>> STEP 8: BACKTESTING")
 
     backtest_engine = BacktestEngine(

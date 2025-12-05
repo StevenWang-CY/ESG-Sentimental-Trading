@@ -82,18 +82,24 @@ signals:
   lookback_window: 252  # Days for z-score calculation
   sentiment_threshold: 0.05  # NEW: Minimum sentiment for directional signal
 
-  # Quality Filters (RELAXED for higher trade count)
+  # Quality Filters (ROOT CAUSE FIX Dec 2025)
+  # Previous issue: Events without Reddit data created noise signals
+  # Fix: Require actual social media validation for trading
   quality_filters:
-    min_intensity: 0.05      # INCREASED: Research shows "extreme" sentiment drives alpha
-    min_volume_ratio: 1.2    # Keep volume ratio to capture subtle shifts
+    min_intensity: 0.05      # Minimum |sentiment| for signal (research: extreme sentiment drives alpha)
+    min_volume_ratio: 1.2    # Minimum volume ratio (post/pre event)
+    min_posts: 5             # NEW: Minimum social media posts required (prevents noise from sparse data)
+    require_social_data: true  # NEW: Exclude events without social media validation
+    balance_long_short: true   # NEW: Ensure equal long/short positions for market neutrality
 
 # Portfolio Construction
 portfolio:
   strategy_type: "long_short"  # long_short, long_only, short_only
-  method: "z_score"  # z_score for continuous ranking (evidence-based)
+  method: "quintile"  # CHANGED: quintile for discrete ranking (z_score caused issues with sparse data)
   max_position: 0.08  # 8% for concentrated high-conviction positions
   rebalance_frequency: "W"  # Weekly - optimal for ESG event frequency
   holding_period: 7  # REDUCED from 12 → 7 days (research: ESG alpha decays in 5-10 days)
+  balance_long_short: true  # NEW: Ensure equal long/short for true market neutrality
 
 # Backtesting Configuration
 backtest:
