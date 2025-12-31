@@ -31,17 +31,17 @@ class TestMomentumFeature(unittest.TestCase):
         # Let's check compute_raw_score
         score = self.generator.compute_raw_score(event_features, reaction_features)
         
-        # Calculate expected score manually
-        # event: 0.2 * 0.8 = 0.16
-        # intensity: 0.45 * ((1+1)/2) = 0.45 * 1.0 = 0.45
-        # volume: 0.25 * 1.0 = 0.25
+        # Calculate expected score manually (CORRECTED weights sum to 1.0)
+        # event: 0.15 * 0.8 = 0.12
+        # intensity: 0.35 * ((1+1)/2) = 0.35 * 1.0 = 0.35
+        # volume: 0.20 * 1.0 = 0.20
         # duration: 0.10 * 1.0 = 0.10
         # max_sentiment: 0.0 * ... = 0
         # polarization: 0.0 * ... = 0
         # momentum: 0.2 * 1.0 = 0.2
-        # Total = 0.16 + 0.45 + 0.25 + 0.10 + 0.2 = 1.16
+        # Total = 0.12 + 0.35 + 0.20 + 0.10 + 0.2 = 0.97
         
-        self.assertAlmostEqual(score, 1.16, places=2)
+        self.assertAlmostEqual(score, 0.97, places=2)
 
     def test_negative_momentum(self):
         # Case 2: Strong Negative
@@ -59,14 +59,15 @@ class TestMomentumFeature(unittest.TestCase):
         
         score = self.generator.compute_raw_score(event_features, reaction_features)
         
-        # event: 0.16
-        # intensity: 0.45 * 0.0 = 0.0
-        # volume: 0.25 * 1.0 = 0.25
+        # CORRECTED weights (sum to 1.0)
+        # event: 0.15 * 0.8 = 0.12
+        # intensity: 0.35 * 0.0 = 0.0
+        # volume: 0.20 * 1.0 = 0.20
         # duration: 0.10
         # momentum: 0.2 * 0.0 = 0.0
-        # Total = 0.16 + 0.0 + 0.25 + 0.10 + 0.0 = 0.51
+        # Total = 0.12 + 0.0 + 0.20 + 0.10 + 0.0 = 0.42
         
-        self.assertAlmostEqual(score, 0.51, places=2)
+        self.assertAlmostEqual(score, 0.42, places=2)
 
     def test_neutral_momentum(self):
         # Case 3: Neutral Sentiment, High Volume
@@ -84,14 +85,15 @@ class TestMomentumFeature(unittest.TestCase):
         
         score = self.generator.compute_raw_score(event_features, reaction_features)
         
-        # event: 0.16
-        # intensity: 0.45 * 0.5 = 0.225
-        # volume: 0.25
+        # CORRECTED weights (sum to 1.0)
+        # event: 0.15 * 0.8 = 0.12
+        # intensity: 0.35 * 0.5 = 0.175
+        # volume: 0.20
         # duration: 0.10
         # momentum: 0.2 * 0.5 = 0.1
-        # Total = 0.16 + 0.225 + 0.25 + 0.10 + 0.1 = 0.835
+        # Total = 0.12 + 0.175 + 0.20 + 0.10 + 0.1 = 0.695
         
-        self.assertAlmostEqual(score, 0.835, places=3)
+        self.assertAlmostEqual(score, 0.695, places=3)
 
 if __name__ == '__main__':
     unittest.main()

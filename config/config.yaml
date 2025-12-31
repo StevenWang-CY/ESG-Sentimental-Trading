@@ -90,7 +90,7 @@ signals:
     min_volume_ratio: 1.2    # Minimum volume ratio (post/pre event)
     min_posts: 5             # NEW: Minimum social media posts required (prevents noise from sparse data)
     require_social_data: true  # NEW: Exclude events without social media validation
-    balance_long_short: true   # NEW: Ensure equal long/short positions for market neutrality
+    balance_long_short: false   # CHANGED: Allow directional trades when data is sparse
 
 # Portfolio Construction
 portfolio:
@@ -98,8 +98,8 @@ portfolio:
   method: "quintile"  # CHANGED: quintile for discrete ranking (z_score caused issues with sparse data)
   max_position: 0.08  # 8% for concentrated high-conviction positions
   rebalance_frequency: "W"  # Weekly - optimal for ESG event frequency
-  holding_period: 7  # REDUCED from 12 → 7 days (research: ESG alpha decays in 5-10 days)
-  balance_long_short: true  # NEW: Ensure equal long/short for true market neutrality
+  holding_period: 10  # FIX: Match days_after_event for full sentiment diffusion (was 7)
+  balance_long_short: false  # CHANGED: Allow directional trades when data is sparse
 
 # Backtesting Configuration
 backtest:

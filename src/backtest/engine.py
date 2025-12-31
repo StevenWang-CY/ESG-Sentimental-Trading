@@ -31,7 +31,8 @@ class BacktestEngine:
                  enable_risk_management: bool = True,
                  max_position_size: float = 0.10,
                  target_volatility: float = 0.12,
-                 max_drawdown_threshold: float = 0.15):
+                 max_drawdown_threshold: float = 0.15,
+                 balance_long_short: bool = True):
         """
         Initialize backtest engine with risk management
 
@@ -43,13 +44,16 @@ class BacktestEngine:
             enable_risk_management: Enable comprehensive risk controls
             max_position_size: Maximum single position size (10%)
             target_volatility: Target portfolio volatility (12% annualized)
+            target_volatility: Target portfolio volatility (12% annualized)
             max_drawdown_threshold: Maximum acceptable drawdown (15%)
+            balance_long_short: Enforce dollar neutrality (default: True)
         """
         self.prices = prices
         self.initial_capital = initial_capital
         self.commission_pct = commission_pct
         self.slippage_bps = slippage_bps / 10000
         self.enable_risk_management = enable_risk_management and RISK_MANAGEMENT_AVAILABLE
+        self.balance_long_short = balance_long_short
 
         self.portfolio_value = []
         self.positions = []
@@ -63,7 +67,8 @@ class BacktestEngine:
                 max_position_size=max_position_size,
                 target_volatility=target_volatility,
                 max_drawdown_threshold=max_drawdown_threshold,
-                min_positions=5  # Minimum diversification
+                min_positions=5,  # Minimum diversification
+                balance_long_short=self.balance_long_short
             )
             self.drawdown_controller = DrawdownController(
                 drawdown_thresholds=[-0.05, -0.10, -0.15, -0.20],
@@ -326,14 +331,18 @@ class BacktestEngine:
 
             # Calculate shares (accounting for transaction costs)
             if target_value > 0:
-                # Long position
-                shares = int(target_value / (price * (1 + self.commission_pct + self.slippage_bps)))
+                # Long position - FIX Issue #8: Use round() instead of int() truncation
+                shares = round(target_value / (price * (1 + self.commission_pct + self.slippage_bps)))
+                if shares == 0 and target_value > price * 0.5:
+                    shares = 1  # Minimum 1 share if target covers at least half a share
                 cost = shares * price * (1 + self.commission_pct + self.slippage_bps)
                 cash -= cost
                 print(f"DEBUG:     LONG: {shares} shares @ ${price:.2f} = ${cost:,.2f}")
             else:
-                # Short position (negative shares)
-                shares = int(target_value / (price * (1 - self.commission_pct - self.slippage_bps)))
+                # Short position (negative shares) - also use round() for consistency
+                shares = round(target_value / (price * (1 - self.commission_pct - self.slippage_bps)))
+                if shares == 0 and target_value < -price * 0.5:
+                    shares = -1  # Minimum 1 share short if target covers at least half a share
                 proceeds = abs(shares) * price * (1 - self.commission_pct - self.slippage_bps)
                 cash += proceeds
                 print(f"DEBUG:     SHORT: {shares} shares @ ${price:.2f} = ${proceeds:,.2f}")

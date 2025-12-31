@@ -26,18 +26,36 @@ class ESGSignalGenerator:
         self.lookback_window = lookback_window
         self.history = []  # Store historical scores for ranking
 
-        # Default weights (research-backed: MDPI 2025, Nature 2024)
-        # Optional weights for max_sentiment and polarization can improve alpha
+        # Default weights aligned with config.yaml (MUST sum to 1.0)
+        # Research-backed: MDPI 2025, Nature 2024, De Gruyter 2025
         self.weights = weights or {
-            'event_severity': 0.20,  # Event detection confidence
-            'intensity': 0.45,       # PRIMARY: Mean sentiment magnitude
-            'volume': 0.25,          # Social conviction
+            'event_severity': 0.15,  # Event detection confidence
+            'intensity': 0.35,       # PRIMARY: Mean sentiment magnitude
+            'volume': 0.20,          # Social conviction
             'duration': 0.10,        # Persistence
-            'sentiment_volume_momentum': 0.20, # NEW: Research-backed SVC metric
-            # NEW: Research-backed enhancements (optional, set to 0 to disable)
+            'sentiment_volume_momentum': 0.20,  # Research-backed SVC metric (De Gruyter 2025)
+            # Optional research-backed enhancements (set to 0 to disable)
             'max_sentiment': 0.0,    # Maximum sentiment (MDPI 2025)
             'polarization': 0.0      # Sentiment disagreement (std)
         }
+        # CRITICAL FIX: Validate weights sum to 1.0
+        self._normalize_weights()
+
+    def _normalize_weights(self):
+        """
+        Ensure signal weights sum to 1.0 for proper score normalization.
+        
+        Academic Basis: Weighted composite scores require weights summing to 1.0
+        for proper normalization (Cochrane, 2005).
+        """
+        # Only consider active weights (non-zero values)
+        active_weights = {k: v for k, v in self.weights.items() if v > 0}
+        total = sum(active_weights.values())
+        
+        if abs(total - 1.0) > 0.01:
+            print(f"⚠ Signal weights sum to {total:.2f}, normalizing to 1.0")
+            for key in active_weights:
+                self.weights[key] = active_weights[key] / total
 
     def compute_raw_score(self, event_features: Dict, reaction_features: Dict) -> float:
         """
@@ -94,15 +112,15 @@ class ESGSignalGenerator:
         momentum_proxy = intensity_raw * volume_normalized
         momentum_normalized = (momentum_proxy + 1.0) / 2.0
 
-        # Compute weighted sum (new features have default weight 0)
+        # Compute weighted sum using actual weights (with proper defaults)
         raw_score = (
-            self.weights.get('event_severity', 0.20) * event_severity +
-            self.weights.get('intensity', 0.45) * intensity_normalized +
-            self.weights.get('volume', 0.25) * volume_normalized +
+            self.weights.get('event_severity', 0.15) * event_severity +
+            self.weights.get('intensity', 0.35) * intensity_normalized +
+            self.weights.get('volume', 0.20) * volume_normalized +
             self.weights.get('duration', 0.10) * duration_normalized +
             self.weights.get('max_sentiment', 0.0) * max_sentiment_normalized +
             self.weights.get('polarization', 0.0) * polarization_normalized +
-            self.weights.get('sentiment_volume_momentum', 0.0) * momentum_normalized
+            self.weights.get('sentiment_volume_momentum', 0.20) * momentum_normalized
         )
 
         return raw_score
@@ -130,16 +148,16 @@ class ESGSignalGenerator:
             'raw_score': raw_score
         })
 
-        # CRITICAL FIX: For sparse ESG events, use ALL historical scores for ranking
-        # (not just same-date scores). ESG events are infrequent, often 1 per date.
-        # Using same-date normalization causes all signals to be neutral (z=0, Q=3).
-        # Changed from: same_date_scores = [h for h in history if h['date'] == date]
-        all_historical_scores = [h['raw_score'] for h in self.history]
+        # CRITICAL FIX Issue #4: Use rolling window for z-score calculation
+        # instead of global history for time-series stationarity
+        # (Jegadeesh & Titman, 1993)
+        recent_history = self.history[-self.lookback_window:] if len(self.history) > self.lookback_window else self.history
+        rolling_scores = [h['raw_score'] for h in recent_history]
 
-        # Compute cross-sectional z-score using ALL historical scores
-        if len(all_historical_scores) > 1:
-            mean_score = np.mean(all_historical_scores)
-            std_score = np.std(all_historical_scores)
+        # Compute cross-sectional z-score using rolling window
+        if len(rolling_scores) > 1:
+            mean_score = np.mean(rolling_scores)
+            std_score = np.std(rolling_scores)
             z_score = (raw_score - mean_score) / (std_score + 1e-6)
         else:
             z_score = 0.0
@@ -147,8 +165,8 @@ class ESGSignalGenerator:
         # Convert to trading signal using tanh
         signal = np.tanh(z_score)  # Maps to [-1, 1]
 
-        # Compute quintile rank using ALL historical scores
-        quintile = self._compute_quintile(raw_score, all_historical_scores)
+        # Compute quintile rank using rolling window scores
+        quintile = self._compute_quintile(raw_score, rolling_scores)
 
         return {
             'ticker': ticker,

@@ -116,10 +116,22 @@ class ReactionFeatureExtractor:
 
     def _calculate_volume_ratio(self, post_event: pd.DataFrame,
                                 pre_event: pd.DataFrame) -> float:
-        """Calculate volume ratio (post vs pre event)"""
+        """Calculate volume ratio (post vs pre event)
+        
+        FIX Issue #3: Penalize events with insufficient pre-event baseline
+        instead of artificially inflating ratio by dividing by 1.
+        
+        Academic Basis: Volume ratio should be undefined or neutral when 
+        baseline is missing (De Gruyter, 2025).
+        """
         volume_post = len(post_event)
-        volume_pre = len(pre_event) if len(pre_event) > 0 else 1
-
+        
+        # FIX: Require minimum 3 pre-event posts for reliable baseline
+        # Otherwise return neutral ratio to avoid false signals
+        if len(pre_event) < 3:
+            return 1.0  # Neutral - insufficient baseline
+        
+        volume_pre = len(pre_event)
         return volume_post / volume_pre
 
     def _calculate_duration(self, post_event: pd.DataFrame,
