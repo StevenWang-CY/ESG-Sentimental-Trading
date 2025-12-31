@@ -648,7 +648,8 @@ def main():
 
     portfolio = portfolio_constructor.construct_portfolio(
         signals_df,
-        method=config['portfolio']['method']
+        method=config['portfolio']['method'],
+        balance_long_short=config.get('signals', {}).get('quality_filters', {}).get('balance_long_short', False)
     )
 
     stats = portfolio_constructor.get_portfolio_statistics(portfolio)
@@ -675,7 +676,8 @@ def main():
         prices=prices,
         initial_capital=config['backtest']['initial_capital'],
         commission_pct=config['backtest']['commission_pct'],
-        slippage_bps=config['backtest']['slippage_bps']
+        slippage_bps=config['backtest']['slippage_bps'],
+        balance_long_short=config.get('signals', {}).get('quality_filters', {}).get('balance_long_short', False)
     )
 
     results = backtest_engine.run(

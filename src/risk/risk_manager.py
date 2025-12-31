@@ -33,7 +33,8 @@ class RiskManager:
                  max_drawdown_threshold: float = 0.15,  # 15% max drawdown trigger
                  stop_loss_pct: float = 0.10,           # 10% stop loss per position
                  min_positions: int = 5,                 # FIX 4.1: 5 for sparse ESG events (was 10)
-                 leverage_limit: float = 1.5):          # Max 1.5x leverage
+                 leverage_limit: float = 1.5,           # Max 1.5x leverage
+                 balance_long_short: bool = True):      # Enforce dollar neutrality (default: True)
         """
         Initialize risk manager
 
@@ -53,6 +54,7 @@ class RiskManager:
         self.stop_loss_pct = stop_loss_pct
         self.min_positions = min_positions
         self.leverage_limit = leverage_limit
+        self.balance_long_short = balance_long_short
 
         # Track portfolio state
         self.portfolio_history = []
@@ -213,6 +215,10 @@ class RiskManager:
         Ensure dollar neutrality (long = short)
         """
         portfolio = portfolio.copy()
+
+        # SKIP neutrality enforcement if disabled
+        if not self.balance_long_short:
+            return portfolio
 
         long_weights = portfolio[portfolio['weight'] > 0]['weight'].sum()
         short_weights = portfolio[portfolio['weight'] < 0]['weight'].abs().sum()

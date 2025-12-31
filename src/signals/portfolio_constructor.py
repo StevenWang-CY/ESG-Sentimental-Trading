@@ -23,7 +23,8 @@ class PortfolioConstructor:
         self.strategy_type = strategy_type
 
     def construct_portfolio(self, signals_df: pd.DataFrame,
-                          method: str = 'quintile') -> pd.DataFrame:
+                          method: str = 'quintile',
+                          balance_long_short: bool = True) -> pd.DataFrame:
         """
         Convert signals to portfolio weights
 
@@ -38,7 +39,7 @@ class PortfolioConstructor:
             return pd.DataFrame(columns=['ticker', 'date', 'weight'])
 
         if method == 'quintile':
-            return self._quintile_portfolio(signals_df)
+            return self._quintile_portfolio(signals_df, balance_long_short=balance_long_short)
         elif method == 'z_score':
             return self._z_score_portfolio(signals_df)
         else:
