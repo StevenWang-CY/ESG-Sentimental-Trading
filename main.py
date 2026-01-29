@@ -10,7 +10,7 @@ from pathlib import Path
 
 # Import project modules
 from src.utils.logging_config import setup_logging
-from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher, RedditFetcher
+from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher, RedditFetcher, ArcticShiftFetcher
 from src.preprocessing import SECFilingParser, TextCleaner
 from src.nlp import ESGEventDetector, FinancialSentimentAnalyzer, ReactionFeatureExtractor
 from src.signals import ESGSignalGenerator, PortfolioConstructor
@@ -116,11 +116,19 @@ def main():
         sentiment_analyzer = FinancialSentimentAnalyzer()
         feature_extractor = ReactionFeatureExtractor(sentiment_analyzer)
 
-        # Initialize social media fetcher (Reddit or Twitter)
+        # Initialize social media fetcher (Arctic Shift, Reddit, or Twitter)
         social_media_config = config['data']['social_media']
-        source = social_media_config.get('source', 'reddit').lower()
+        source = social_media_config.get('source', 'arctic_shift').lower()
 
-        if source == 'reddit':
+        if source == 'arctic_shift':
+            arctic_config = config['data'].get('arctic_shift', {})
+            social_media_fetcher = ArcticShiftFetcher(
+                use_mock=arctic_config.get('use_mock', False),
+                subreddits=arctic_config.get('subreddits', None),
+                request_timeout=arctic_config.get('request_timeout', 15),
+            )
+            logger.info("Arctic Shift fetcher initialized (no credentials needed)")
+        elif source == 'reddit':
             reddit_config = config['data']['reddit']
             social_media_fetcher = RedditFetcher(
                 client_id=reddit_config.get('client_id'),

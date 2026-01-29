@@ -15,10 +15,10 @@ data:
     data_folder: "./data/processed/prices"
 
   # Social Media Data Configuration
-  # Default source: Reddit (better for historical data, no API restrictions)
-  # Alternative: Twitter (limited to 7 days history on free tier)
+  # Default source: multi_source (combines Arctic Shift + GDELT + StockTwits)
+  # Alternatives: arctic_shift, gdelt, stocktwits, reddit, twitter
   social_media:
-    source: "reddit"  # "reddit" or "twitter"
+    source: "multi_source"  # "multi_source", "arctic_shift", "gdelt", "stocktwits", "reddit", "twitter"
     max_posts_per_ticker: 300  # INCREASED to 300 for richer sentiment data (revised strategy)
     days_before_event: 5  # INCREASED to 5 - capture pre-event leakage (research-backed)
     days_after_event: 10  # INCREASED to 10 - capture full diffusion cycle
@@ -30,7 +30,44 @@ data:
       - "diversity"
       - "governance"
 
-  # Reddit API Configuration (Free, unlimited historical access)
+  # Arctic Shift Configuration (Free, no credentials required)
+  # Accesses archived Reddit data via https://arctic-shift.photon-reddit.com
+  arctic_shift:
+    use_mock: false  # Set to true for testing without API calls
+    request_timeout: 15  # HTTP request timeout in seconds
+    subreddits:  # Subreddits to search (ordered by signal quality)
+      - "stocks"
+      - "investing"
+      - "StockMarket"
+      - "wallstreetbets"
+      - "ESG_Investing"
+
+  # GDELT Configuration (Free, no credentials required)
+  # Global news database monitoring 65+ languages from 2015+
+  # API: https://blog.gdeltproject.org/gdelt-doc-2-0-api-version-2/
+  gdelt:
+    use_mock: false  # Set to true for testing without API calls
+    request_timeout: 30  # HTTP request timeout in seconds
+    max_articles: 50  # Maximum articles per search query
+
+  # StockTwits Configuration (Free, no credentials required)
+  # Stock social media with native bullish/bearish sentiment
+  # API: https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json
+  # Note: Only returns recent messages (no historical date filtering)
+  stocktwits:
+    use_mock: false  # Set to true for testing without API calls
+    request_timeout: 15  # HTTP request timeout in seconds
+    max_pages: 5  # Max pages to paginate backward per ticker
+
+  # Multi-Source Configuration
+  # Combines multiple sources for richer sentiment data
+  multi_source:
+    sources:  # Sources to combine (all free, no credentials)
+      - "arctic_shift"
+      - "gdelt"
+      - "stocktwits"
+
+  # Reddit API Configuration (requires API credentials)
   # NOTE: Set credentials in .env file, NOT here. See .env.example for template.
   reddit:
     client_id: "${REDDIT_CLIENT_ID}"  # Load from environment variable
@@ -60,7 +97,10 @@ nlp:
   event_detector:
     type: "rule_based"  # rule_based or ml
     ml_model: "yiyanghkust/finbert-esg"  # Only used if type=ml
-    confidence_threshold: 0.30  # LOWERED to 0.30 to increase trade count (balanced quality vs quantity)
+    # NOTE: This threshold should be validated via walk-forward testing
+    # AUDIT WARNING: "LOWERED to increase trade count" is look-ahead bias
+    # Use validation framework to find optimal threshold on training data only
+    confidence_threshold: 0.30
 
   # Sentiment Analysis
   sentiment_analyzer:
@@ -69,28 +109,85 @@ nlp:
 
 # Signal Generation
 signals:
-  # Composite Score Weights (FIXED Nov 2025: Sentiment drives alpha)
-  # Previous weights caused sentiment inversion bug (negative sentiment → long positions)
+  # Composite Score Weights
+  # AUDIT REFACTOR (Jan 2026): Weights can now be derived statistically
+  # Set weight_derivation_method to control how weights are determined:
+  #   - "fixed": Use the weights below (legacy behavior)
+  #   - "equal": Equal weight across all components
+  #   - "inverse_variance": Weight inversely proportional to component variance
+  #   - "correlation": Weight proportional to return correlation (requires validation)
+  weight_derivation_method: "inverse_variance"  # RECOMMENDED: data-driven weights
+
+  # Fixed weights (used when weight_derivation_method="fixed")
+  # Note: These are legacy values - prefer statistical derivation
   weights:
-    event_severity: 0.15  # Reduced to make room for momentum
-    intensity: 0.35       # High weight, but balanced with momentum
-    volume: 0.20          # Volume is important, but momentum captures the interaction
-    duration: 0.10        # Persistence
-    sentiment_volume_momentum: 0.20 # NEW: Research-backed SVC metric (Sentiment * Volume Change)
+    event_severity: 0.15
+    intensity: 0.35
+    volume: 0.20
+    duration: 0.10
+    sentiment_volume_momentum: 0.20
 
   # Signal Parameters
-  lookback_window: 252  # Days for z-score calculation
-  sentiment_threshold: 0.05  # NEW: Minimum sentiment for directional signal
+  lookback_window: 252  # Days for z-score calculation and weight calibration
+  sentiment_threshold: 0.05  # Minimum sentiment for directional signal
 
-  # Quality Filters (ROOT CAUSE FIX Dec 2025)
-  # Previous issue: Events without Reddit data created noise signals
-  # Fix: Require actual social media validation for trading
+  # Quality Filters
+  # These ensure signals come from real data with sufficient coverage
   quality_filters:
-    min_intensity: 0.05      # Minimum |sentiment| for signal (research: extreme sentiment drives alpha)
-    min_volume_ratio: 1.2    # Minimum volume ratio (post/pre event)
-    min_posts: 5             # NEW: Minimum social media posts required (prevents noise from sparse data)
-    require_social_data: true  # NEW: Exclude events without social media validation
-    balance_long_short: false   # CHANGED: Allow directional trades when data is sparse
+    min_intensity: 0.05      # Minimum |sentiment| for signal
+    min_volume_ratio: 1.0    # LOWERED from 1.2: accept all events with posts
+    min_posts: 3             # LOWERED from 5 to 3: more signals for diversification
+    require_social_data: true  # Exclude events without social media validation
+    balance_long_short: true  # CHANGED: Force balanced L/S to prevent directional blowup
+
+# Walk-Forward Validation Configuration (AUDIT ADDITION Jan 2026)
+# CRITICAL: Use this to validate strategy before deployment
+# Walk-forward prevents look-ahead bias by training/testing on separate time periods
+validation:
+  enabled: true  # Enable walk-forward validation
+  min_train_months: 12  # Minimum training period (months)
+  test_months: 3  # Out-of-sample test period (months)
+  step_months: 3  # Step size between validation folds
+  embargo_days: 5  # Gap between train/test to prevent data leakage
+
+  # Acceptance criteria for strategy deployment
+  acceptance_criteria:
+    min_oos_sharpe: 0.0  # Minimum out-of-sample Sharpe ratio (positive)
+    min_overfit_ratio: 0.4  # test_sharpe / train_sharpe (detect overfitting)
+    min_profitable_folds: 0.5  # At least 50% of folds must be profitable
+
+  # Weight derivation for validation
+  weight_method: "inverse_variance"  # Method used during walk-forward
+
+# Risk Management Configuration (AUDIT REFACTOR Jan 2026)
+# Thresholds can now be derived from historical data instead of hard-coded
+risk_management:
+  enabled: true
+
+  # Position sizing
+  max_position_size: 0.10  # 10% maximum per position
+  min_positions: 5  # Minimum diversification
+
+  # Volatility targeting
+  target_volatility: 0.12  # 12% annualized target
+  volatility_lookback: 20  # Days for vol calculation
+
+  # Drawdown control
+  # AUDIT: Set adaptive_thresholds=true to derive from historical data
+  adaptive_thresholds: true  # Derive thresholds from actual drawdown distribution
+  max_drawdown_threshold: 0.15  # 15% max (used if adaptive_thresholds=false)
+
+  # Circuit breaker for scandals/flash crashes
+  circuit_breaker:
+    enabled: true
+    volume_spike_threshold: 5.0  # 5x normal volume triggers alert
+    sentiment_crash_threshold: -0.5  # Sentiment drop triggers alert
+    halt_duration_hours: 24  # Default halt duration
+
+  # Data quality monitoring
+  data_quality:
+    min_coverage_ratio: 0.5  # Minimum data coverage to continue trading
+    stale_data_hours: 24  # Hours without data before reducing positions
 
 # Portfolio Construction
 portfolio:
@@ -99,7 +196,7 @@ portfolio:
   max_position: 0.08  # 8% for concentrated high-conviction positions
   rebalance_frequency: "W"  # Weekly - optimal for ESG event frequency
   holding_period: 10  # FIX: Match days_after_event for full sentiment diffusion (was 7)
-  balance_long_short: false  # CHANGED: Allow directional trades when data is sparse
+  balance_long_short: true  # CHANGED: Force balanced to prevent 8:1 short bias
 
 # Backtesting Configuration
 backtest:

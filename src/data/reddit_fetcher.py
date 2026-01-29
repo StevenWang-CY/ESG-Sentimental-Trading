@@ -6,6 +6,10 @@ v3.4: Semantic & Sentiment-Based Filtering
 - Replaced hard karma/score thresholds with ESG relevance scoring
 - Integrated FinBERT sentiment analysis for quality filtering
 - Posts are scored on: ESG relevance, sentiment strength, engagement quality
+
+AUDIT FIX (Jan 2026):
+- Fixed character-based truncation that could break mid-word
+- Added proper word-boundary truncation for FinBERT compatibility
 """
 
 import os
@@ -15,6 +19,45 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 import time
 import re
+
+
+def truncate_text_safely(text: str, max_chars: int = 500) -> str:
+    """
+    Truncate text at word boundaries to avoid breaking tokens.
+
+    AUDIT FIX: Character-based truncation [:500] can break mid-word,
+    which causes issues with FinBERT tokenization (e.g., "environmen" instead
+    of "environmental" loses semantic meaning).
+
+    This function truncates at the last word boundary before max_chars.
+
+    Args:
+        text: Text to truncate
+        max_chars: Maximum characters (default: 500)
+
+    Returns:
+        Truncated text ending at a word boundary
+    """
+    if not text or len(text) <= max_chars:
+        return text
+
+    # Find last word boundary (space) before limit
+    truncated = text[:max_chars]
+
+    # Find last space
+    last_space = truncated.rfind(' ')
+
+    if last_space > max_chars * 0.7:  # Only use if >70% of content preserved
+        return truncated[:last_space].strip()
+
+    # If no good word boundary, truncate at sentence end if possible
+    for punct in ['. ', '! ', '? ', '\n']:
+        last_punct = truncated.rfind(punct)
+        if last_punct > max_chars * 0.5:
+            return truncated[:last_punct + 1].strip()
+
+    # Fallback: just truncate (rare case)
+    return truncated.strip()
 
 
 # ESG SEMANTIC KEYWORDS with category weights
@@ -502,7 +545,11 @@ class RedditFetcher:
                                     author_karma = 0
 
                                 # Combine title + body for analysis
-                                post_text = f"{submission.title} {submission.selftext}"[:500]
+                                # AUDIT FIX: Use word-boundary truncation instead of [:500]
+                                post_text = truncate_text_safely(
+                                    f"{submission.title} {submission.selftext}",
+                                    max_chars=500
+                                )
 
                                 # v3.4: SEMANTIC & SENTIMENT FILTERING (replaces hard thresholds)
                                 # Compute quality scores using NLP analysis
@@ -570,7 +617,11 @@ class RedditFetcher:
                                     author_karma = 0
 
                                 # v3.4: Use semantic/sentiment filtering for fallback too
-                                post_text = f"{submission.title} {submission.selftext}"[:500]
+                                # AUDIT FIX: Use word-boundary truncation
+                                post_text = truncate_text_safely(
+                                    f"{submission.title} {submission.selftext}",
+                                    max_chars=500
+                                )
                                 quality = self._compute_post_quality(
                                     text=post_text,
                                     ticker=ticker,

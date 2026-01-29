@@ -32,7 +32,7 @@ import sys
 # Import project modules
 from src.utils.logging_config import setup_logging
 from src.utils.cache_manager import compute_config_hash, is_cache_fresh, build_cache_key
-from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher, RedditFetcher
+from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher, RedditFetcher, ArcticShiftFetcher, GDELTFetcher, StockTwitsFetcher, MultiSourceFetcher
 from src.data.universe_fetcher import UniverseFetcher
 from src.preprocessing import SECFilingParser, TextCleaner
 from src.nlp import ESGEventDetector, FinancialSentimentAnalyzer, ReactionFeatureExtractor
@@ -48,11 +48,53 @@ def load_config(config_path: str = 'config/config.yaml'):
 
 
 def validate_social_media_config(config):
-    """Validate social media API configuration (Reddit or Twitter)"""
+    """Validate social media API configuration (Reddit, Twitter, or Arctic Shift)"""
     social_media_config = config.get('data', {}).get('social_media', {})
-    source = social_media_config.get('source', 'reddit').lower()
+    source = social_media_config.get('source', 'arctic_shift').lower()
 
-    if source == 'reddit':
+    if source == 'multi_source':
+        # Multi-source needs no credentials - combines free APIs
+        multi_config = config.get('data', {}).get('multi_source', {})
+        sources = multi_config.get('sources', ['arctic_shift', 'gdelt', 'stocktwits'])
+        print("\n" + "="*60)
+        print("Using MULTI-SOURCE data fusion (no credentials required)")
+        print("="*60)
+        print(f"Active sources: {', '.join(sources)}")
+        print("  - Arctic Shift: Historical Reddit data")
+        print("  - GDELT: Global news articles")
+        print("  - StockTwits: Stock social media")
+        print("="*60 + "\n")
+        return True, 'multi_source'
+
+    elif source == 'arctic_shift':
+        # Arctic Shift needs no credentials - always valid
+        print("\n" + "="*60)
+        print("Using Arctic Shift API (no credentials required)")
+        print("="*60)
+        print("Free access to archived Reddit data for research.")
+        print("API: https://arctic-shift.photon-reddit.com")
+        print("="*60 + "\n")
+        return True, 'arctic_shift'
+
+    elif source == 'gdelt':
+        print("\n" + "="*60)
+        print("Using GDELT DOC API (no credentials required)")
+        print("="*60)
+        print("Free access to global news articles from 2015+.")
+        print("API: https://api.gdeltproject.org/api/v2/doc/doc")
+        print("="*60 + "\n")
+        return True, 'gdelt'
+
+    elif source == 'stocktwits':
+        print("\n" + "="*60)
+        print("Using StockTwits API (no credentials required)")
+        print("="*60)
+        print("Free access to stock social media with sentiment.")
+        print("Note: Only returns recent messages (no historical date filtering)")
+        print("="*60 + "\n")
+        return True, 'stocktwits'
+
+    elif source == 'reddit':
         reddit_config = config.get('data', {}).get('reddit', {})
 
         if reddit_config.get('use_mock', True):
@@ -140,8 +182,8 @@ def main():
                        help='Delete all cached data before running')
     parser.add_argument('--force-real-social-media', action='store_true',
                        help='Force real social media API (override mock mode)')
-    parser.add_argument('--social-source', type=str, choices=['reddit', 'twitter'],
-                       help='Override social media source (reddit or twitter)')
+    parser.add_argument('--social-source', type=str, choices=['reddit', 'twitter', 'arctic_shift', 'gdelt', 'stocktwits', 'multi_source'],
+                       help='Override social media source (multi_source, arctic_shift, gdelt, stocktwits, reddit, twitter)')
 
     args = parser.parse_args()
 
@@ -196,8 +238,10 @@ def main():
 
     # Validate social media configuration
     if args.force_real_social_media:
-        source = config['data']['social_media'].get('source', 'reddit')
-        if source == 'reddit':
+        source = config['data']['social_media'].get('source', 'arctic_shift')
+        if source == 'arctic_shift':
+            config['data'].setdefault('arctic_shift', {})['use_mock'] = False
+        elif source == 'reddit':
             config['data']['reddit']['use_mock'] = False
         else:
             config['data']['twitter']['use_mock'] = False
@@ -360,7 +404,10 @@ def main():
     logger.info(f"Loaded {len(factors)} periods of factor data")
 
     # Step 5: Event Detection & Sentiment Analysis
-    source_name = "Reddit" if social_source == 'reddit' else "Twitter"
+    source_name = {
+        'reddit': 'Reddit', 'twitter': 'Twitter', 'arctic_shift': 'Arctic Shift',
+        'gdelt': 'GDELT', 'stocktwits': 'StockTwits', 'multi_source': 'Multi-Source',
+    }.get(social_source, social_source)
     logger.info(f"\n>>> STEP 5: EVENT DETECTION & {source_name.upper()} SENTIMENT ANALYSIS")
 
     # Compute config hash for events cache (depends on NLP parameters)
@@ -405,10 +452,43 @@ def main():
         sentiment_analyzer = FinancialSentimentAnalyzer()
         feature_extractor = ReactionFeatureExtractor(sentiment_analyzer)
 
-        # Initialize social media fetcher (Reddit or Twitter)
+        # Initialize social media fetcher (Arctic Shift, Reddit, or Twitter)
         social_media_config = config['data']['social_media']
 
-        if social_source == 'reddit':
+        if social_source == 'multi_source':
+            multi_config = config['data'].get('multi_source', {})
+            arctic_config = config['data'].get('arctic_shift', {})
+            gdelt_config = config['data'].get('gdelt', {})
+            stocktwits_config = config['data'].get('stocktwits', {})
+            social_media_fetcher = MultiSourceFetcher(
+                sources=multi_config.get('sources', ['arctic_shift', 'gdelt', 'stocktwits']),
+                enable_sentiment=True,
+                arctic_shift_config=arctic_config,
+                gdelt_config=gdelt_config,
+                stocktwits_config=stocktwits_config,
+            )
+        elif social_source == 'arctic_shift':
+            arctic_config = config['data'].get('arctic_shift', {})
+            social_media_fetcher = ArcticShiftFetcher(
+                use_mock=arctic_config.get('use_mock', False),
+                subreddits=arctic_config.get('subreddits', None),
+                request_timeout=arctic_config.get('request_timeout', 15),
+            )
+        elif social_source == 'gdelt':
+            gdelt_config = config['data'].get('gdelt', {})
+            social_media_fetcher = GDELTFetcher(
+                use_mock=gdelt_config.get('use_mock', False),
+                request_timeout=gdelt_config.get('request_timeout', 30),
+                max_articles=gdelt_config.get('max_articles', 50),
+            )
+        elif social_source == 'stocktwits':
+            stocktwits_config = config['data'].get('stocktwits', {})
+            social_media_fetcher = StockTwitsFetcher(
+                use_mock=stocktwits_config.get('use_mock', False),
+                request_timeout=stocktwits_config.get('request_timeout', 15),
+                max_pages=stocktwits_config.get('max_pages', 5),
+            )
+        elif social_source == 'reddit':
             reddit_config = config['data']['reddit']
             social_media_fetcher = RedditFetcher(
                 client_id=reddit_config.get('client_id'),

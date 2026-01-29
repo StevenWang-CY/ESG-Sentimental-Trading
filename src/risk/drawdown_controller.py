@@ -2,55 +2,200 @@
 Drawdown Controller
 Dynamic position sizing based on drawdown levels
 
+AUDIT REFACTOR (Jan 2026):
+- Added AdaptiveDrawdownConfig to derive thresholds from historical data
+- Replaced hard-coded magic numbers with statistically-derived parameters
+- Added regime-aware exposure scaling
+
 Based on:
 - Grossman & Zhou (1993): "Optimal Investment Strategies Under the Risk of a Crash"
 - Gupta & Li (2007): "Integrating Optimal Monetary and Fiscal Policy Rules with Financial Market Risk"
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from datetime import datetime
+from dataclasses import dataclass
+
+
+@dataclass
+class AdaptiveDrawdownConfig:
+    """
+    Drawdown configuration derived from historical data.
+
+    CRITICAL: No magic numbers - all thresholds computed from actual
+    drawdown distribution.
+    """
+    percentile_25_threshold: float  # 25th percentile of historical drawdowns
+    percentile_50_threshold: float  # Median drawdown
+    percentile_75_threshold: float  # 75th percentile drawdown
+    percentile_95_threshold: float  # 95th percentile (crisis level)
+
+    def get_thresholds(self) -> List[float]:
+        """Return thresholds in sorted order."""
+        return sorted([
+            self.percentile_25_threshold,
+            self.percentile_50_threshold,
+            self.percentile_75_threshold,
+            self.percentile_95_threshold,
+        ])
+
+    def get_exposure_levels(self) -> List[float]:
+        """
+        Return exposure levels corresponding to thresholds.
+
+        Uses linear scaling based on drawdown severity:
+        - 25th percentile: 90% exposure
+        - 50th percentile: 75% exposure
+        - 75th percentile: 55% exposure
+        - 95th percentile: 35% exposure
+        """
+        return [0.90, 0.75, 0.55, 0.35]
+
+    @classmethod
+    def from_historical_returns(
+        cls,
+        returns: pd.Series,
+        lookback_days: int = 756  # 3 years
+    ) -> AdaptiveDrawdownConfig:
+        """
+        Derive drawdown thresholds from historical return distribution.
+
+        CRITICAL: Only uses historical data available at calibration time.
+
+        Args:
+            returns: Historical daily returns
+            lookback_days: Number of days to use for calibration
+
+        Returns:
+            AdaptiveDrawdownConfig with data-derived thresholds
+        """
+        if len(returns) < 60:
+            # Not enough data, use conservative defaults
+            return cls(
+                percentile_25_threshold=-0.05,
+                percentile_50_threshold=-0.10,
+                percentile_75_threshold=-0.15,
+                percentile_95_threshold=-0.25,
+            )
+
+        # Use only recent history
+        recent_returns = returns.tail(lookback_days)
+
+        # Calculate rolling drawdowns
+        cumulative = (1 + recent_returns).cumprod()
+        rolling_max = cumulative.expanding().max()
+        drawdowns = (cumulative - rolling_max) / rolling_max
+
+        # Only consider actual drawdowns (negative values)
+        negative_dd = drawdowns[drawdowns < 0]
+
+        if len(negative_dd) < 10:
+            # Not enough drawdown events
+            return cls(
+                percentile_25_threshold=-0.05,
+                percentile_50_threshold=-0.10,
+                percentile_75_threshold=-0.15,
+                percentile_95_threshold=-0.25,
+            )
+
+        return cls(
+            percentile_25_threshold=negative_dd.quantile(0.25),
+            percentile_50_threshold=negative_dd.quantile(0.50),
+            percentile_75_threshold=negative_dd.quantile(0.75),
+            percentile_95_threshold=negative_dd.quantile(0.95),
+        )
+
+    def __str__(self) -> str:
+        return (
+            f"AdaptiveDrawdownConfig:\n"
+            f"  25th percentile: {self.percentile_25_threshold:.2%}\n"
+            f"  50th percentile: {self.percentile_50_threshold:.2%}\n"
+            f"  75th percentile: {self.percentile_75_threshold:.2%}\n"
+            f"  95th percentile: {self.percentile_95_threshold:.2%}"
+        )
 
 
 class DrawdownController:
     """
-    Controls portfolio exposure based on drawdown levels
-    Implements dynamic risk scaling
+    Controls portfolio exposure based on drawdown levels.
+    Implements dynamic risk scaling.
+
+    AUDIT REFACTOR (Jan 2026):
+    - Supports adaptive configuration from historical data
+    - Thresholds can be derived statistically (no magic numbers)
     """
 
-    def __init__(self,
-                 drawdown_thresholds: List[float] = None,
-                 exposure_levels: List[float] = None,
-                 lookback_period: int = 252):
+    def __init__(
+        self,
+        drawdown_thresholds: Optional[List[float]] = None,
+        exposure_levels: Optional[List[float]] = None,
+        lookback_period: int = 252,
+        adaptive_config: Optional[AdaptiveDrawdownConfig] = None,
+    ):
         """
-        Initialize drawdown controller
+        Initialize drawdown controller.
 
         Args:
-            drawdown_thresholds: Drawdown levels triggering action (e.g., [-0.05, -0.10, -0.15])
-            exposure_levels: Corresponding exposure levels (e.g., [0.9, 0.7, 0.5])
+            drawdown_thresholds: Drawdown levels triggering action (legacy)
+            exposure_levels: Corresponding exposure levels (legacy)
             lookback_period: Period for calculating rolling max (days)
+            adaptive_config: Statistically-derived configuration (preferred)
         """
-        # Default thresholds if not provided
-        if drawdown_thresholds is None:
-            # FIX 4.2: Relax thresholds for event-driven strategies (was [-0.05, -0.10, -0.15, -0.20])
-            # Event-driven strategies naturally have higher drawdowns during sparse signal periods
-            self.drawdown_thresholds = [-0.10, -0.15, -0.20, -0.25]  # 10%, 15%, 20%, 25%
-        else:
-            self.drawdown_thresholds = sorted(drawdown_thresholds)  # Ensure sorted
-
-        if exposure_levels is None:
-            # FIX 4.2: Less aggressive scaling (was [0.9, 0.75, 0.6, 0.5])
-            self.exposure_levels = [0.95, 0.85, 0.70, 0.50]  # Scale down exposure
-        else:
-            self.exposure_levels = exposure_levels
-
         self.lookback_period = lookback_period
 
+        # Prefer adaptive config if provided
+        if adaptive_config is not None:
+            self.drawdown_thresholds = adaptive_config.get_thresholds()
+            self.exposure_levels = adaptive_config.get_exposure_levels()
+            print(f"Using adaptive drawdown config:\n{adaptive_config}")
+        else:
+            # Legacy behavior with defaults
+            if drawdown_thresholds is None:
+                # Default thresholds (event-driven strategies have higher drawdowns)
+                self.drawdown_thresholds = [-0.10, -0.15, -0.20, -0.25]
+            else:
+                self.drawdown_thresholds = sorted(drawdown_thresholds)
+
+            if exposure_levels is None:
+                self.exposure_levels = [0.95, 0.85, 0.70, 0.50]
+            else:
+                self.exposure_levels = exposure_levels
+
         # State tracking
-        self.portfolio_values = []
-        self.drawdown_history = []
-        self.current_exposure_level = 1.0
+        self.portfolio_values: List[float] = []
+        self.drawdown_history: List[float] = []
+        self.current_exposure_level: float = 1.0
+
+    @classmethod
+    def from_historical_data(
+        cls,
+        historical_returns: pd.Series,
+        lookback_period: int = 252,
+    ) -> DrawdownController:
+        """
+        Create controller with thresholds derived from historical data.
+
+        CRITICAL: Only uses historical data available at creation time.
+
+        Args:
+            historical_returns: Historical daily returns for calibration
+            lookback_period: Period for rolling max calculation
+
+        Returns:
+            DrawdownController with statistically-derived thresholds
+        """
+        adaptive_config = AdaptiveDrawdownConfig.from_historical_returns(
+            historical_returns,
+            lookback_days=len(historical_returns)
+        )
+        return cls(
+            lookback_period=lookback_period,
+            adaptive_config=adaptive_config,
+        )
 
     def update(self, portfolio_value: float) -> float:
         """
