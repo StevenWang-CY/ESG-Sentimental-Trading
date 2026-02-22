@@ -211,29 +211,20 @@ class RiskManager:
 
     def _normalize_weights(self, portfolio: pd.DataFrame) -> pd.DataFrame:
         """
-        Normalize weights for long-short portfolio
-        Ensure dollar neutrality (long = short)
+        Normalize weights for long-short portfolio.
+
+        Preserves the long/short ratio from portfolio construction (e.g. 130/30)
+        instead of forcing dollar neutrality.  Dollar neutrality destroyed the
+        intentional long bias needed to compensate for systematic negative
+        sentiment in ESG event data (Barber & Odean 2008, Edmans 2011).
         """
         portfolio = portfolio.copy()
 
-        # SKIP neutrality enforcement if disabled
+        # SKIP normalization if disabled
         if not self.balance_long_short:
             return portfolio
 
-        long_weights = portfolio[portfolio['weight'] > 0]['weight'].sum()
-        short_weights = portfolio[portfolio['weight'] < 0]['weight'].abs().sum()
-
-        if long_weights == 0 or short_weights == 0:
-            return portfolio
-
-        # Scale to ensure dollar neutrality
-        if long_weights > short_weights:
-            # Scale down longs
-            portfolio.loc[portfolio['weight'] > 0, 'weight'] *= (short_weights / long_weights)
-        elif short_weights > long_weights:
-            # Scale down shorts
-            portfolio.loc[portfolio['weight'] < 0, 'weight'] *= (long_weights / short_weights)
-
+        # Preserve the ratio set by portfolio constructor — do NOT force neutrality
         return portfolio
 
     def check_stop_loss(self,

@@ -40,7 +40,7 @@ Score: TypeAlias = float
 SIGNAL_SCHEMA = {
     'ticker':              {'dtype': 'str',     'required': True},
     'date':                {'dtype': 'datetime', 'required': True},
-    'raw_score':           {'dtype': 'float',   'required': True,  'min': 0.0, 'max': 1.0},
+    'raw_score':           {'dtype': 'float',   'required': True,  'min': -1.0, 'max': 1.0},
     'z_score':             {'dtype': 'float',   'required': True},
     'signal':              {'dtype': 'float',   'required': True,  'min': -1.0, 'max': 1.0},
     'quintile':            {'dtype': 'int',     'required': True,  'min': 1,   'max': 5},
@@ -169,7 +169,7 @@ def enforce_signal_schema(df: pd.DataFrame) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
 
     # Clip to valid ranges
-    df['raw_score'] = df['raw_score'].clip(0.0, 1.0)
+    df['raw_score'] = df['raw_score'].clip(-1.0, 1.0)
     df['signal'] = df['signal'].clip(-1.0, 1.0)
     df['event_confidence'] = df['event_confidence'].clip(0.0, 1.0)
     df['sentiment_intensity'] = df['sentiment_intensity'].clip(-1.0, 1.0)
@@ -298,13 +298,12 @@ class StatisticalWeightDeriver:
             return ValidatedWeights.from_equal()
 
         if self.method == WeightDerivationMethod.FIXED:
-            # Use default weights (legacy behavior)
+            # Use default weights (no momentum — was double-counting intensity)
             return ValidatedWeights(
-                event_severity=0.15,
-                intensity=0.35,
-                volume=0.20,
-                duration=0.10,
-                momentum=0.20,
+                event_severity=0.20,
+                intensity=0.40,
+                volume=0.25,
+                duration=0.15,
             )
 
         if len(historical_signals) < 20:
@@ -464,13 +463,12 @@ class ESGSignalGenerator:
             self.weights = self._validated_weights.to_dict()
         else:
             # Default weights (will be recalibrated if statistical method chosen)
-            # AUDIT NOTE: These are legacy defaults, prefer statistical derivation
+            # No momentum component (was double-counting intensity)
             self._validated_weights = ValidatedWeights(
-                event_severity=0.15,
-                intensity=0.35,
-                volume=0.20,
-                duration=0.10,
-                momentum=0.20,
+                event_severity=0.20,
+                intensity=0.40,
+                volume=0.25,
+                duration=0.15,
             )
             self.weights = self._validated_weights.to_dict()
 
@@ -535,76 +533,76 @@ class ESGSignalGenerator:
 
     def compute_raw_score(self, event_features: Dict, reaction_features: Dict) -> float:
         """
-        Compute composite ESG Event Shock Score
+        Compute directional ESG Event Score using direction x conviction.
 
         Formula:
-        Score = w1*EventSeverity + w2*Intensity + w3*Volume + w4*Duration
-                + w5*MaxSentiment + w6*Polarization
+        raw_score = sign(sentiment) * conviction
+        conviction = w1*EventSeverity + w2*|Intensity| + w3*Volume + w4*Duration
 
-        Academic references:
-        - MDPI (2025): Max and std of sentiment are significant predictors
-        - Nature (2024): Weighted sentiment improves prediction
+        This separates DIRECTION (from sentiment sign) from CONVICTION
+        (from evidence strength), producing a signed score in [-1, 1].
+
+        Previous bug: intensity was mapped to [0,1] via (x+1)/2, destroying
+        sentiment direction. All raw_scores were positive (~0.3-0.65),
+        making long/short assignments random.
 
         Args:
             event_features: Dictionary with event detection results
             reaction_features: Dictionary with sentiment features
 
         Returns:
-            Raw signal score
+            Signed raw score in [-1, 1]. Positive = bullish, negative = bearish.
         """
-        # 1. Event Severity (from event detection confidence)
+        # 1. Direction: derived from social media sentiment only
+        # REVERTED Fix #10: ESG event polarity from SEC filings has systematic negative bias
+        # (75% bearish due to predominance of disclosure of problems/violations vs achievements).
+        # Event polarity should not be used as standalone directional signal.
+        intensity_raw = reaction_features.get('intensity', 0.0)
+        direction = float(np.sign(intensity_raw)) if abs(intensity_raw) > 0.01 else 0.0
+
+        # 2. Conviction components (all in [0, 1], direction-free)
+        # Event severity from detection confidence
         event_severity = event_features.get('confidence', 0.5)
 
-        # 2. Intensity (sentiment magnitude with direction)
-        # CRITICAL FIX: Use SIGNED sentiment to determine quintile
-        # Positive sentiment → High quintile (Q5) → Long positions
-        # Negative sentiment → Low quintile (Q1) → Short positions
-        # This ensures sentiment-quintile alignment for long-short strategy
-        intensity_raw = reaction_features.get('intensity', 0.0)
-        # Normalize to [0, 1] range: map [-1, 1] sentiment to [0, 1]
-        intensity_normalized = (intensity_raw + 1.0) / 2.0  # Maps -1→0, 0→0.5, +1→1
+        # Sentiment magnitude (absolute value — direction already extracted)
+        sentiment_strength = abs(intensity_raw)
 
-        # 3. Volume (log-normalized volume ratio)
+        # Volume (log-normalized volume ratio)
         volume_ratio = reaction_features.get('volume_ratio', 1.0)
         volume_normalized = min(np.log1p(volume_ratio) / np.log(10), 1.0)
 
-        # 4. Duration (normalize by max expected days)
+        # Duration (normalize by max expected days)
         duration_days = reaction_features.get('duration_days', 0)
         duration_normalized = min(duration_days / 7.0, 1.0)
 
-        # 5. NEW: Max Sentiment (MDPI 2025 - max is predictive)
-        max_sentiment_raw = reaction_features.get('max_sentiment', 0.0)
-        max_sentiment_normalized = (max_sentiment_raw + 1.0) / 2.0
-
-        # 6. NEW: Polarization/Sentiment Std (disagreement measure)
-        # Higher polarization indicates market disagreement - can amplify moves
-        polarization = reaction_features.get('polarization', 0.0)
-        polarization_normalized = min(polarization, 1.0)  # Already in [0, 1] range
-
-        # 7. NEW: Sentiment Volume Momentum (SVC Metric)
-        # Combines sentiment direction with volume conviction
-        # Formula: intensity * volume_normalized (Range: [-1, 1])
-        # Normalized to [0, 1] for scoring
-        momentum_proxy = intensity_raw * volume_normalized
-        momentum_normalized = (momentum_proxy + 1.0) / 2.0
-
-        # Compute weighted sum using actual weights (with proper defaults)
-        raw_score = (
-            self.weights.get('event_severity', 0.15) * event_severity +
-            self.weights.get('intensity', 0.35) * intensity_normalized +
-            self.weights.get('volume', 0.20) * volume_normalized +
-            self.weights.get('duration', 0.10) * duration_normalized +
-            self.weights.get('max_sentiment', 0.0) * max_sentiment_normalized +
-            self.weights.get('polarization', 0.0) * polarization_normalized +
-            self.weights.get('sentiment_volume_momentum', 0.20) * momentum_normalized
+        # 3. Weighted conviction (no momentum — was double-counting intensity)
+        conviction = (
+            self.weights.get('event_severity', 0.20) * event_severity +
+            self.weights.get('intensity', 0.40) * sentiment_strength +
+            self.weights.get('volume', 0.25) * volume_normalized +
+            self.weights.get('duration', 0.15) * duration_normalized
         )
+
+        # 4. Pre-event sentiment confirmation boost:
+        # If pre-event sentiment agrees with post-event direction, boost conviction.
+        # This captures early warning signals that were previously discarded.
+        pre_event_sent = reaction_features.get('pre_event_sentiment', 0.0)
+        if direction != 0 and np.sign(pre_event_sent) == direction:
+            conviction *= 1.10  # 10% boost for directional confirmation
+
+        # 5. Final signed score: direction * conviction
+        raw_score = direction * conviction  # Range: [-1, 1]
 
         return raw_score
 
     def compute_signal(self, ticker: str, date: datetime,
                       event_features: Dict, reaction_features: Dict) -> Dict:
         """
-        Convert raw score to standardized signal
+        Convert raw score to standardized signal.
+
+        The z-score and quintile computed here are provisional — they will be
+        recomputed by _apply_cross_sectional_ranking() using per-date grouping.
+        With signed raw_scores, the sign already encodes direction.
 
         Args:
             ticker: Stock ticker
@@ -624,25 +622,17 @@ class ESGSignalGenerator:
             'raw_score': raw_score
         })
 
-        # CRITICAL FIX Issue #4: Use rolling window for z-score calculation
-        # instead of global history for time-series stationarity
-        # (Jegadeesh & Titman, 1993)
-        recent_history = self.history[-self.lookback_window:] if len(self.history) > self.lookback_window else self.history
-        rolling_scores = [h['raw_score'] for h in recent_history]
+        # Provisional values (recomputed cross-sectionally later)
+        z_score = raw_score  # Pass through signed score
+        signal = float(np.tanh(z_score))
 
-        # Compute cross-sectional z-score using rolling window
-        if len(rolling_scores) > 1:
-            mean_score = np.mean(rolling_scores)
-            std_score = np.std(rolling_scores)
-            z_score = (raw_score - mean_score) / (std_score + 1e-6)
+        # Provisional quintile from sign (refined by cross-sectional ranking)
+        if raw_score > 0:
+            quintile = 5
+        elif raw_score < 0:
+            quintile = 1
         else:
-            z_score = 0.0
-
-        # Convert to trading signal using tanh
-        signal = np.tanh(z_score)  # Maps to [-1, 1]
-
-        # Compute quintile rank using rolling window scores
-        quintile = self._compute_quintile(raw_score, rolling_scores)
+            quintile = 3
 
         return {
             'ticker': ticker,
@@ -681,16 +671,17 @@ class ESGSignalGenerator:
 
     def _apply_cross_sectional_ranking(self, signals_df: pd.DataFrame) -> pd.DataFrame:
         """
-        FIX 2.1: Apply cross-sectional ranking to assign quintiles
+        Apply cross-sectional ranking to assign quintiles from signed raw_scores.
+
+        With signed raw_scores (negative=bearish, positive=bullish),
+        pd.qcut naturally separates negative scores into Q1 (short) and
+        positive scores into Q5 (long).
 
         Groups signals by date and ranks within each date.
-        For sparse data (<5 signals per date), uses tertile split:
-        - Top 1/3 → Q5 (long positions)
-        - Bottom 1/3 → Q1 (short positions)
-        - Middle 1/3 → Q3 (neutral)
+        For sparse data (<5 signals per date), uses tertile split.
 
         Args:
-            signals_df: DataFrame with raw signals
+            signals_df: DataFrame with signed raw_scores in [-1, 1]
 
         Returns:
             DataFrame with corrected quintile assignments
@@ -702,11 +693,12 @@ class ESGSignalGenerator:
         signals_df['date'] = pd.to_datetime(signals_df['date'])
 
         def assign_quintiles_per_date(group):
-            """Assign quintiles within a single date"""
+            """Assign quintiles within a single date using signed raw_scores"""
             n_signals = len(group)
 
             if n_signals >= 5:
-                # Standard quintile split (20% per quintile)
+                # Standard quintile split — signed scores naturally separate
+                # negative (Q1/short) from positive (Q5/long)
                 try:
                     group['quintile'] = pd.qcut(
                         group['raw_score'],
@@ -715,37 +707,35 @@ class ESGSignalGenerator:
                         duplicates='drop'
                     )
                 except ValueError:
-                    # Handle case where all scores are identical
+                    # All scores identical — assign neutral
                     group['quintile'] = 3
             else:
-                # Tertile split for sparse data
-                # Top 1/3 → Q5, Bottom 1/3 → Q1, Middle → Q3
                 scores = group['raw_score'].values
 
                 if n_signals == 1:
-                    # Single signal → use sentiment to determine quintile
-                    sentiment = group['sentiment_intensity'].iloc[0]
-                    if sentiment > 0.1:
-                        group['quintile'] = 5  # Long
-                    elif sentiment < -0.1:
-                        group['quintile'] = 1  # Short
+                    # Single signal: use raw_score sign (already encodes direction)
+                    score = scores[0]
+                    if score > 0:
+                        group['quintile'] = 5  # Bullish → long
+                    elif score < 0:
+                        group['quintile'] = 1  # Bearish → short
                     else:
                         group['quintile'] = 3  # Neutral
                 elif n_signals == 2:
-                    # Two signals → one long, one short
-                    group['quintile'] = group['raw_score'].rank(method='first').map({1: 1, 2: 5})
+                    # Two signals: lower → Q1, higher → Q5
+                    group['quintile'] = group['raw_score'].rank(method='first').map({1.0: 1, 2.0: 5}).astype(int)
                 else:
-                    # 3-4 signals → tertile split
+                    # 3-4 signals: tertile split on signed scores
                     percentile_33 = np.percentile(scores, 33.33)
                     percentile_67 = np.percentile(scores, 66.67)
 
                     def assign_tertile(score):
                         if score <= percentile_33:
-                            return 1  # Bottom tertile → Q1 (short)
+                            return 1  # Bottom → Q1 (short)
                         elif score >= percentile_67:
-                            return 5  # Top tertile → Q5 (long)
+                            return 5  # Top → Q5 (long)
                         else:
-                            return 3  # Middle tertile → Q3 (neutral)
+                            return 3  # Middle → neutral
 
                     group['quintile'] = group['raw_score'].apply(assign_tertile)
 
@@ -754,24 +744,40 @@ class ESGSignalGenerator:
         # Apply cross-sectional ranking per date
         signals_df = signals_df.groupby('date', group_keys=False).apply(assign_quintiles_per_date)
 
+        # FIX #9: Sign-validated quintile assignment
+        # Prevent contra-directional trades: Q5 (long) must have positive raw_score,
+        # Q1 (short) must have negative raw_score. Override violations to Q3 (neutral).
+        # Scientific basis: Factor portfolios trade in the direction of factor exposure
+        # (Fama & French 1993). Shorting a bullish signal contradicts the strategy's thesis.
+        mask_wrong_long = (signals_df['quintile'] == 5) & (signals_df['raw_score'] < 0)
+        mask_wrong_short = (signals_df['quintile'] == 1) & (signals_df['raw_score'] > 0)
+        n_corrected = mask_wrong_long.sum() + mask_wrong_short.sum()
+        signals_df.loc[mask_wrong_long, 'quintile'] = 3
+        signals_df.loc[mask_wrong_short, 'quintile'] = 3
+        if n_corrected > 0:
+            print(f"  Sign validation: corrected {n_corrected} contra-directional quintile assignments")
+
         # Recompute z-scores using same-date normalization (proper cross-sectional)
         def recompute_z_scores(group):
-            """Recompute z-scores within each date"""
+            """Recompute z-scores within each date from signed raw_scores"""
             if len(group) > 1:
                 mean_score = group['raw_score'].mean()
                 std_score = group['raw_score'].std()
                 group['z_score'] = (group['raw_score'] - mean_score) / (std_score + 1e-6)
                 group['signal'] = np.tanh(group['z_score'])
             else:
-                # Single signal → use sentiment direction
-                sentiment = group['sentiment_intensity'].iloc[0]
-                group['z_score'] = np.sign(sentiment) * 1.0
+                # Single signal: use raw_score magnitude for z-score, not just sign.
+                # Previously forced to sign(score)*1.0, making tanh(1.0)=0.76 regardless
+                # of whether raw_score was 0.1 or 0.9. This destroyed signal differentiation.
+                # Scale by 2.0: weak (0.1) → tanh(0.2)=0.20, strong (0.9) → tanh(1.8)=0.95.
+                score = group['raw_score'].iloc[0]
+                group['z_score'] = float(score) * 2.0
                 group['signal'] = np.tanh(group['z_score'])
             return group
 
         signals_df = signals_df.groupby('date', group_keys=False).apply(recompute_z_scores)
 
-        print(f"\n✓ Cross-sectional ranking applied:")
+        print(f"\n  Cross-sectional ranking applied:")
         print(f"  Dates with signals: {signals_df['date'].nunique()}")
         print(f"  Avg signals per date: {len(signals_df) / signals_df['date'].nunique():.1f}")
 
@@ -785,7 +791,10 @@ class ESGSignalGenerator:
 
     def generate_signals_batch(self, events_data: List[Dict],
                                 min_posts: int = 5,
-                                require_social_data: bool = True) -> pd.DataFrame:
+                                require_social_data: bool = True,
+                                min_volume_ratio: float = 1.2,
+                                min_intensity: float = 0.05,
+                                min_confidence: float = 0.0) -> pd.DataFrame:
         """
         Generate signals for multiple events with quality filtering.
 
@@ -794,10 +803,17 @@ class ESGSignalGenerator:
         - Fallback sentiment (-0.5, 0, +0.5) caused bimodal quintile distribution
         - Now requires actual social media validation for trading signals
 
+        TRADE FREQUENCY FIX (Jan 2026):
+        - Config values for min_volume_ratio and min_intensity were being ignored
+        - Added min_confidence parameter for safe permissive-mode filtering
+
         Args:
             events_data: List of dictionaries with event and reaction data
             min_posts: Minimum number of social media posts required (default: 5)
             require_social_data: If True, exclude events without social data (default: True)
+            min_volume_ratio: Minimum volume ratio for signal inclusion (default: 1.2)
+            min_intensity: Minimum |sentiment| intensity for signal inclusion (default: 0.05)
+            min_confidence: Minimum confidence score for signal inclusion (default: 0.0)
 
         Returns:
             DataFrame with all signals
@@ -818,11 +834,31 @@ class ESGSignalGenerator:
             signal['n_posts'] = n_posts
             signal['has_social_data'] = n_posts > 0
 
-            # Compute signal confidence (higher with more posts and stronger sentiment)
+            # Compute signal confidence (higher with more posts, stronger sentiment,
+            # event detection quality, and multi-source agreement)
+            event_conf = signal['event_confidence']
             sentiment_strength = abs(signal['sentiment_intensity'])
-            volume_boost = min(signal['volume_ratio'] / 2.0, 1.0)  # Cap at 2x
-            post_confidence = min(n_posts / 50.0, 1.0)  # Cap at 50 posts
-            signal['confidence'] = (0.4 * sentiment_strength + 0.3 * volume_boost + 0.3 * post_confidence)
+            volume_boost = min(signal['volume_ratio'] / 2.0, 1.0)
+            post_confidence = min(n_posts / 30.0, 1.0)  # Faster saturation (was /50)
+
+            base_confidence = (
+                0.25 * event_conf +          # Event detection quality
+                0.30 * sentiment_strength +   # Sentiment magnitude
+                0.20 * volume_boost +         # Volume confirmation
+                0.25 * post_confidence        # Data sufficiency
+            )
+
+            # Multi-source agreement bonus: independent corroboration lifts confidence
+            n_sources = event_data['reaction_features'].get('n_sources', 1)
+            source_agreement = event_data['reaction_features'].get('source_agreement', 0.0)
+            if n_sources >= 3 and source_agreement >= 0.8:
+                agreement_bonus = 0.20  # All sources agree on direction
+            elif n_sources >= 2 and source_agreement >= 0.5:
+                agreement_bonus = 0.10  # Majority of sources agree
+            else:
+                agreement_bonus = 0.0
+
+            signal['confidence'] = min(base_confidence + agreement_bonus, 1.0)
 
             signals.append(signal)
 
@@ -842,36 +878,51 @@ class ESGSignalGenerator:
         print(f"  Events WITH social data: {len(events_with_social)}")
         print(f"  Events WITHOUT social data: {len(events_without_social)}")
 
-        # ROOT CAUSE FIX #2: Exclude events without social data from trading
-        # Academic basis: Social sentiment is the primary alpha driver (45% weight)
-        # Without social validation, the signal is noise, not signal
+        # ROOT CAUSE FIX #2: Handle events by social media coverage
         if require_social_data:
+            # Strict mode: exclude events without social data entirely
             print(f"  ⚠ EXCLUDING {len(events_without_social)} events without social media data")
             print(f"    (Research: social sentiment drives alpha; fallback values add noise)")
             df_signals = events_with_social.copy()
+        else:
+            # Permissive mode: keep all events, rely on confidence filtering downstream
+            # Events without social data naturally get lower confidence scores
+            print(f"  Keeping all {len(df_signals)} events (require_social_data=False)")
+            print(f"    Events without social data filtered by confidence (≥{min_confidence})")
 
         if df_signals.empty:
-            print(f"  ⚠ No events with social data. Cannot generate trading signals.")
+            print(f"  ⚠ No events passed social data filter. Cannot generate trading signals.")
             return pd.DataFrame()
 
         # ROOT CAUSE FIX #3: Apply minimum post count filter
-        # Academic basis: Sentiment from <5 posts is statistically unreliable
+        # In permissive mode, only filter events that claim to have social data
         before_post_filter = len(df_signals)
-        df_signals = df_signals[df_signals['n_posts'] >= min_posts].copy()
+        if require_social_data:
+            df_signals = df_signals[df_signals['n_posts'] >= min_posts].copy()
+        else:
+            # Events without social data bypass post count filter (filtered by confidence)
+            mask = (~df_signals['has_social_data']) | (df_signals['n_posts'] >= min_posts)
+            df_signals = df_signals[mask].copy()
         print(f"  Events after min_posts filter (≥{min_posts}): {len(df_signals)} (removed {before_post_filter - len(df_signals)})")
 
         if df_signals.empty:
             print(f"  ⚠ No events with sufficient posts. Try lowering min_posts threshold.")
             return pd.DataFrame()
 
-        # Apply volume and sentiment filters
+        # Apply volume and sentiment filters (using config values, not hardcoded)
         before_volume = len(df_signals)
-        df_signals = self.filter_by_volume(df_signals, min_volume_ratio=1.2)
-        print(f"  Events after volume filter (≥1.2x): {len(df_signals)} (removed {before_volume - len(df_signals)})")
+        df_signals = self.filter_by_volume(df_signals, min_volume_ratio=min_volume_ratio)
+        print(f"  Events after volume filter (≥{min_volume_ratio}x): {len(df_signals)} (removed {before_volume - len(df_signals)})")
 
         before_sentiment = len(df_signals)
-        df_signals = self.filter_by_sentiment(df_signals, min_abs_intensity=0.05)
-        print(f"  Events after sentiment filter (|intensity|≥0.05): {len(df_signals)} (removed {before_sentiment - len(df_signals)})")
+        df_signals = self.filter_by_sentiment(df_signals, min_abs_intensity=min_intensity)
+        print(f"  Events after sentiment filter (|intensity|≥{min_intensity}): {len(df_signals)} (removed {before_sentiment - len(df_signals)})")
+
+        # Apply confidence floor (critical when require_social_data=False)
+        if min_confidence > 0:
+            before_confidence = len(df_signals)
+            df_signals = df_signals[df_signals['confidence'] >= min_confidence].copy()
+            print(f"  Events after confidence filter (≥{min_confidence}): {len(df_signals)} (removed {before_confidence - len(df_signals)})")
 
         if df_signals.empty:
             print(f"  ⚠ All events filtered out. Consider relaxing thresholds.")
@@ -922,6 +973,8 @@ class ESGSignalGenerator:
         Filter signals by minimum absolute sentiment intensity (Priority 1 improvement)
 
         Eliminates neutral-sentiment signals that dilute alpha.
+        REVERTED Fix #10: Filters on sentiment_intensity instead of raw_score.
+        This prevents including ESG event-only signals which have systematic negative bias.
 
         Args:
             signals_df: DataFrame with signals

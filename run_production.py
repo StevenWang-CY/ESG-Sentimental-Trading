@@ -295,9 +295,13 @@ def main():
     # Step 2: Download SEC filings
     logger.info("\n>>> STEP 2: DOWNLOADING SEC FILINGS")
 
-    # Build cache key for SEC filings (immutable data - no config hash needed)
+    # Read configured filing types
+    filing_types = config['data']['sec'].get('filing_types', ['8-K'])
+    filing_type_suffix = '_'.join(ft.replace('-', '') for ft in sorted(filing_types))
+
+    # Build cache key for SEC filings (includes filing types for cache invalidation)
     filings_cache_file = Path('data') / build_cache_key(
-        data_type='filings',
+        data_type=f'filings_{filing_type_suffix}',
         universe=args.universe,
         start_date=args.start_date,
         end_date=args.end_date,
@@ -322,24 +326,26 @@ def main():
         )
 
         all_filings = []
+        logger.info(f"Filing types to download: {filing_types}")
         for i, ticker in enumerate(tickers):
-            logger.info(f"Downloading filings for {ticker} ({i+1}/{len(tickers)})...")
+            for filing_type in filing_types:
+                logger.info(f"Downloading {filing_type} for {ticker} ({i+1}/{len(tickers)})...")
 
-            filings = sec_downloader.fetch_filings(
-                tickers=[ticker],
-                filing_type='8-K',  # Focus on 8-K for material events
-                start_date=args.start_date,
-                end_date=args.end_date
-            )
+                filings = sec_downloader.fetch_filings(
+                    tickers=[ticker],
+                    filing_type=filing_type,
+                    start_date=args.start_date,
+                    end_date=args.end_date
+                )
 
-            all_filings.extend(filings)
+                all_filings.extend(filings)
 
             # Rate limiting (SEC allows 10 requests/second)
             if i < len(tickers) - 1:
                 import time
                 time.sleep(0.1)
 
-        logger.info(f"Downloaded {len(all_filings)} SEC filings")
+        logger.info(f"Downloaded {len(all_filings)} SEC filings across {filing_types}")
 
         # Save to cache if requested
         if args.save_data or args.use_cache:
@@ -417,7 +423,8 @@ def main():
         'nlp.sentiment_analyzer.model',
         'data.social_media.days_before_event',
         'data.social_media.days_after_event',
-        'data.social_media.max_posts_per_ticker'
+        'data.social_media.max_posts_per_ticker',
+        'data.sec.filing_types'
     ]
     nlp_hash = compute_config_hash(config, nlp_config_keys)
 
@@ -510,6 +517,21 @@ def main():
 
         events_data = []
 
+        # Extract confidence threshold from config (fixes bug where config value was ignored)
+        confidence_threshold = config['nlp']['event_detector']['confidence_threshold']
+
+        # Filing-type-specific thresholds:
+        # 8-K filings report MATERIAL EVENTS (new information) → use config threshold
+        # 10-K/10-Q filings are PERIODIC REPORTS that always contain ESG boilerplate in
+        # Risk Factors and MD&A sections. A confidence of 0.25 (3 keyword matches) is trivially
+        # easy to hit in a 100-page annual report without any actual ESG event occurring.
+        # Require 6+ keyword matches (confidence 0.60) to filter boilerplate from real events.
+        confidence_threshold_periodic = max(confidence_threshold * 2.4, 0.60)
+
+        logger.info(f"Event detection confidence thresholds:")
+        logger.info(f"  8-K (material events): {confidence_threshold}")
+        logger.info(f"  10-K/10-Q (periodic reports): {confidence_threshold_periodic}")
+
         # FIX 1.2: Defensive date filtering (second layer of defense)
         # Filter out any filings that somehow got through with wrong dates
         original_count = len(all_filings)
@@ -561,8 +583,18 @@ def main():
 
                 text = text_cleaner.clean_for_sentiment_analysis(text)
 
-                # Detect ESG events
-                event_result = event_detector.detect_event(text)
+                # For 10-K/10-Q: extract ESG-relevant sections only (Risk Factors, MD&A)
+                # to avoid detecting keywords in boilerplate text across 100+ pages.
+                # For 8-K: use full text (entire filing is about the material event).
+                filing_type = filing.get('filing_type', '8-K')
+                if filing_type in ('10-K', '10-Q'):
+                    text = filing_parser.extract_esg_relevant_sections(text, filing_type)
+                    effective_threshold = confidence_threshold_periodic
+                else:
+                    effective_threshold = confidence_threshold
+
+                # Detect ESG events with filing-type-appropriate threshold
+                event_result = event_detector.detect_event(text, threshold=effective_threshold)
 
                 if event_result['has_event']:
                     logger.info(f"  ✓ ESG Event detected: {event_result['category']} "
@@ -646,6 +678,12 @@ def main():
                         # Extract features from available social media data
                         reaction_features = feature_extractor.extract_features(posts_df, event_date)
 
+                    # Add multi-source agreement metrics (boosts confidence)
+                    if hasattr(social_media_fetcher, 'last_source_metrics'):
+                        source_metrics = social_media_fetcher.last_source_metrics
+                        reaction_features['n_sources'] = source_metrics.get('n_sources', 1)
+                        reaction_features['source_agreement'] = source_metrics.get('source_agreement', 0.0)
+
                     logger.info(f"  Posts: {reaction_features['n_tweets']}, "
                               f"Intensity: {reaction_features['intensity']:.3f}, "
                               f"Volume: {reaction_features['volume_ratio']:.2f}x")
@@ -683,15 +721,17 @@ def main():
     # Load quality filter thresholds from config (ROOT CAUSE FIX Dec 2025)
     quality_filters = config.get('signals', {}).get('quality_filters', {})
     min_intensity = quality_filters.get('min_intensity', 0.05)
-    min_volume_ratio = quality_filters.get('min_volume_ratio', 1.2)
+    min_volume_ratio = quality_filters.get('min_volume_ratio', 1.0)
     min_posts = quality_filters.get('min_posts', 5)  # NEW: Minimum posts required
     require_social_data = quality_filters.get('require_social_data', True)  # NEW: Require social validation
+    min_confidence = quality_filters.get('min_confidence', 0.0)  # Confidence floor (for permissive mode)
 
     logger.info(f"Quality Filters (ROOT CAUSE FIX - Dec 2025):")
     logger.info(f"  Min intensity: {min_intensity}")
     logger.info(f"  Min volume ratio: {min_volume_ratio}x")
     logger.info(f"  Min posts: {min_posts} (excludes events with sparse social data)")
     logger.info(f"  Require social data: {require_social_data} (excludes events without Reddit coverage)")
+    logger.info(f"  Min confidence: {min_confidence} (filters low-quality signals)")
 
     signal_generator = ESGSignalGenerator()
 
@@ -700,7 +740,10 @@ def main():
     signals_df = signal_generator.generate_signals_batch(
         events_data,
         min_posts=min_posts,
-        require_social_data=require_social_data
+        require_social_data=require_social_data,
+        min_volume_ratio=min_volume_ratio,
+        min_intensity=min_intensity,
+        min_confidence=min_confidence,
     )
 
     if signals_df.empty:
@@ -726,10 +769,17 @@ def main():
         strategy_type=config['portfolio']['strategy_type']
     )
 
+    # Rolling window: accumulate non-expired signals at each rebalance date
+    # window_days = holding_period ensures signal lifetime matches position lifetime
+    window_days = config['portfolio'].get('holding_period', 0)
+    rebalance_freq = config['portfolio'].get('rebalance_frequency', 'W')
+
     portfolio = portfolio_constructor.construct_portfolio(
         signals_df,
         method=config['portfolio']['method'],
-        balance_long_short=config.get('signals', {}).get('quality_filters', {}).get('balance_long_short', False)
+        balance_long_short=config.get('signals', {}).get('quality_filters', {}).get('balance_long_short', False),
+        window_days=window_days,
+        rebalance_freq=rebalance_freq,
     )
 
     stats = portfolio_constructor.get_portfolio_statistics(portfolio)

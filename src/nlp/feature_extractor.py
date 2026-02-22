@@ -62,7 +62,11 @@ class ReactionFeatureExtractor:
         df['days_since_event'] = (df['timestamp'] - event_date).dt.total_seconds() / 86400
 
         # Separate pre and post event data
-        post_event = df[df['days_since_event'] >= 0]
+        # CRITICAL: Cap post-event window at +3 days to prevent look-ahead bias.
+        # Academic event study standard: [0, +3] day window (MacKinlay 1997).
+        # Even if upstream fetcher provides wider data, we discard it here.
+        MAX_POST_EVENT_DAYS = 3
+        post_event = df[(df['days_since_event'] >= 0) & (df['days_since_event'] <= MAX_POST_EVENT_DAYS)]
         pre_event = df[df['days_since_event'] < 0]
 
         # Feature 1: INTENSITY (weighted average sentiment)
@@ -80,19 +84,30 @@ class ReactionFeatureExtractor:
         # Feature 5: BASELINE DEVIATION (how unusual is this?)
         baseline_deviation = self._calculate_baseline_deviation(post_event, pre_event)
 
+        # Feature 6: PRE-EVENT SENTIMENT DIRECTION
+        # Captures sentiment build-up before the event. If negative buzz
+        # precedes a bad ESG filing, this adds directional confirmation.
+        pre_event_sentiment = self._calculate_pre_event_sentiment(pre_event)
+
         return {
             'intensity': intensity,
             'volume_ratio': volume_ratio,
             'duration_days': duration_days,
             'amplification': amplification,
             'baseline_deviation': baseline_deviation,
+            'pre_event_sentiment': pre_event_sentiment,
             'n_tweets': len(df),
             'n_pre_event': len(pre_event),
             'n_post_event': len(post_event)
         }
 
     def _calculate_intensity(self, post_event: pd.DataFrame) -> float:
-        """Calculate weighted average sentiment intensity"""
+        """Calculate weighted average sentiment intensity.
+
+        Weights combine engagement (virality) and ESG relevance (quality_score)
+        so that high-quality ESG posts contribute more to the aggregate
+        sentiment, producing stronger intensity for genuine ESG events.
+        """
         if post_event.empty:
             return 0.0
 
@@ -105,8 +120,13 @@ class ReactionFeatureExtractor:
         else:
             virality = np.ones(len(post_event))
 
-        # Weighted average
-        weights = virality + 1  # Add 1 to avoid zero weights
+        # Quality boost: amplify posts with higher ESG relevance
+        if 'quality_score' in post_event.columns:
+            quality = post_event['quality_score'].fillna(0.5)
+            weights = (virality + 1) * (quality + 0.5)
+        else:
+            weights = virality + 1  # Fallback: virality only
+
         intensity = np.average(
             post_event['sentiment_score'].fillna(0),
             weights=weights
@@ -125,12 +145,17 @@ class ReactionFeatureExtractor:
         baseline is missing (De Gruyter, 2025).
         """
         volume_post = len(post_event)
-        
-        # FIX: Require minimum 3 pre-event posts for reliable baseline
-        # Otherwise return neutral ratio to avoid false signals
+
+        if volume_post == 0:
+            return 1.0  # No post-event data at all
+
         if len(pre_event) < 3:
-            return 1.0  # Neutral - insufficient baseline
-        
+            # Surprise/breakout event: no prior discussion baseline.
+            # Use log-scaled post count as volume signal (Tetlock 2007:
+            # unexpected news carries the most alpha).
+            # 10 posts → 2.4, 50 posts → 3.9 (bounded, monotonic)
+            return float(np.log1p(volume_post))
+
         volume_pre = len(pre_event)
         return volume_post / volume_pre
 
@@ -182,6 +207,21 @@ class ReactionFeatureExtractor:
 
         return float(baseline_deviation)
 
+    def _calculate_pre_event_sentiment(self, pre_event: pd.DataFrame) -> float:
+        """Calculate directional sentiment from pre-event period.
+
+        Captures sentiment build-up before the event. If negative social media
+        builds up before a bad ESG filing, this provides directional confirmation.
+        Returns 0.0 if fewer than 3 pre-event posts (insufficient data).
+        """
+        if len(pre_event) < 3:
+            return 0.0
+
+        if 'sentiment_score' not in pre_event.columns:
+            return 0.0
+
+        return float(pre_event['sentiment_score'].mean())
+
     def _get_default_features(self) -> Dict:
         """Return default features when no data available"""
         return {
@@ -190,6 +230,7 @@ class ReactionFeatureExtractor:
             'duration_days': 0,
             'amplification': 0.0,
             'baseline_deviation': 0.0,
+            'pre_event_sentiment': 0.0,
             'n_tweets': 0,
             'n_pre_event': 0,
             'n_post_event': 0

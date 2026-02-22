@@ -195,9 +195,13 @@ class BacktestEngine:
         """
         Get rebalancing dates based on frequency
 
-        CRITICAL FIX: Properly implement weekly/monthly rebalancing
-        Previously this ignored freq parameter and rebalanced on every signal date,
-        causing excessive turnover (7.44x instead of expected 3-5x)
+        CRITICAL FIX (v2): Generate a FULL weekly/monthly grid, not just weeks with signals.
+        Previous bug: Only generated dates for weeks WITH signals, causing gaps of 40-90 days
+        where positions couldn't be liquidated (holding period was 10 days but positions
+        were held 49-91 days due to missing rebalance dates).
+
+        The fix generates a continuous grid from first signal to last signal + buffer,
+        using actual trading dates (not calendar dates) to avoid holiday mismatches.
 
         Args:
             signals: DataFrame with 'date' column
@@ -209,20 +213,40 @@ class BacktestEngine:
         signal_dates = pd.to_datetime(signals['date'].unique())
 
         if freq == 'D':
-            # Daily rebalancing: use all signal dates
             return sorted(signal_dates)
-        elif freq == 'W':
-            # Weekly rebalancing: use week-end dates (Fridays)
-            # Group signals by week and take the last date of each week
-            signal_df = pd.DataFrame({'date': signal_dates})
-            signal_df['week'] = signal_df['date'].dt.to_period('W')
-            rebalance_dates = signal_df.groupby('week')['date'].max().tolist()
+
+        # Get all trading dates from price data for full grid generation
+        if isinstance(self.prices.index, pd.MultiIndex):
+            all_trading_dates = sorted(self.prices.index.get_level_values(0).unique())
+        else:
+            all_trading_dates = sorted(self.prices.index.unique())
+        all_trading_dates = pd.DatetimeIndex([d for d in all_trading_dates if pd.notna(d)])
+
+        # Grid spans from first signal date to last signal date + 4 weeks buffer
+        # Buffer ensures final positions get liquidated after their holding period expires
+        min_date = signal_dates.min()
+        max_signal_date = signal_dates.max()
+        buffer_end = max_signal_date + pd.Timedelta(days=28)
+        max_date = min(buffer_end, all_trading_dates.max())
+
+        # Filter to trading dates within range
+        mask = (all_trading_dates >= min_date) & (all_trading_dates <= max_date)
+        range_dates = all_trading_dates[mask]
+
+        if len(range_dates) == 0:
+            return sorted(signal_dates)
+
+        if freq == 'W':
+            # Weekly: last trading day of each ISO week
+            trading_df = pd.DataFrame({'date': range_dates})
+            trading_df['week'] = trading_df['date'].dt.to_period('W')
+            rebalance_dates = trading_df.groupby('week')['date'].max().tolist()
             return sorted(rebalance_dates)
         elif freq == 'M':
-            # Monthly rebalancing: use month-end dates
-            signal_df = pd.DataFrame({'date': signal_dates})
-            signal_df['month'] = signal_df['date'].dt.to_period('M')
-            rebalance_dates = signal_df.groupby('month')['date'].max().tolist()
+            # Monthly: last trading day of each month
+            trading_df = pd.DataFrame({'date': range_dates})
+            trading_df['month'] = trading_df['date'].dt.to_period('M')
+            rebalance_dates = trading_df.groupby('month')['date'].max().tolist()
             return sorted(rebalance_dates)
         else:
             print(f"WARNING: Unknown rebalance frequency '{freq}', defaulting to signal dates")
@@ -264,8 +288,12 @@ class BacktestEngine:
 
         print(f"DEBUG:   Found {len(target_signals)} signals for {date}")
         if target_signals.empty:
-            print(f"DEBUG:   WARNING: No signals found for {date}")
-            return {}, cash
+            # CRITICAL FIX: Return kept positions, NOT empty dict
+            # Previous bug: returned ({}, cash) which dropped all active positions
+            # that were within their holding period. This caused positions to vanish
+            # on rebalance dates without new signals.
+            print(f"DEBUG:   No new signals for {date}, keeping {len(positions_to_keep)} active positions")
+            return positions_to_keep, cash
 
         # Apply risk management if enabled
         if self.enable_risk_management and self.risk_manager is not None:

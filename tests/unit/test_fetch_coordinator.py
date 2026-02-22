@@ -97,7 +97,7 @@ def make_sample_signal_df(n=10):
     return pd.DataFrame({
         'ticker': ['AAPL'] * n,
         'date': [base_date + timedelta(days=i) for i in range(n)],
-        'raw_score': np.random.uniform(0, 1, n),
+        'raw_score': np.random.uniform(-1, 1, n),
         'z_score': np.random.uniform(-2, 2, n),
         'signal': np.tanh(np.random.uniform(-2, 2, n)),
         'quintile': np.random.choice([1, 2, 3, 4, 5], n),
@@ -535,7 +535,7 @@ class TestSignalSchemaValidation:
     def test_out_of_bounds_detected(self):
         df = make_sample_signal_df(5)
         df.loc[0, 'signal'] = 1.5  # max is 1.0
-        df.loc[1, 'raw_score'] = -0.1  # min is 0.0
+        df.loc[1, 'raw_score'] = -1.5  # min is -1.0
         violations = validate_signal_schema(df, raise_on_error=False)
         assert any('signal' in v for v in violations)
         assert any('raw_score' in v for v in violations)
@@ -560,7 +560,7 @@ class TestEnforceSignalSchema:
         df.loc[2, 'quintile'] = 0
         result = enforce_signal_schema(df)
         assert result['signal'].max() <= 1.0
-        assert result['raw_score'].min() >= 0.0
+        assert result['raw_score'].min() >= -1.0
         assert result['quintile'].min() >= 1
 
     def test_adds_missing_columns(self):

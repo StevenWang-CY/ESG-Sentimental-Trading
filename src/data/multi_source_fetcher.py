@@ -177,6 +177,9 @@ class MultiSourceFetcher:
         # Store for diagnostics
         self._last_result = result
 
+        # Compute cross-source sentiment agreement
+        self._last_source_metrics = self._compute_source_agreement(result)
+
         if not result.quorum_met:
             print(
                 f"  [Multi-Source] WARNING: Quorum not met for {ticker} "
@@ -201,6 +204,57 @@ class MultiSourceFetcher:
         print(f"    ESG-relevant: {esg_count}/{total} | Avg sentiment: {avg_sentiment:+.2f}")
 
         return combined[STANDARD_COLUMNS]
+
+    @property
+    def last_source_metrics(self) -> Dict:
+        """Access source agreement metrics from the most recent fetch."""
+        return getattr(self, '_last_source_metrics',
+                       {'n_sources': 0, 'source_agreement': 0.0})
+
+    def _compute_source_agreement(self, result: CoordinatedResult) -> Dict:
+        """
+        Compute cross-source sentiment agreement metrics.
+
+        Measures whether independent sources (Reddit, GDELT, StockTwits)
+        agree on sentiment direction. Agreement boosts signal confidence
+        because independent corroboration is a strong quality indicator.
+
+        Returns:
+            Dict with n_sources (int) and source_agreement (float 0-1).
+        """
+        source_sentiments = {}
+        for name, sr in result.source_results.items():
+            if sr.status in (SourceStatus.SUCCESS, SourceStatus.PARTIAL) and sr.row_count > 0:
+                mean_sentiment = float(sr.data['sentiment'].mean())
+                source_sentiments[name] = mean_sentiment
+
+        n_sources = len(source_sentiments)
+        if n_sources < 2:
+            return {'n_sources': n_sources, 'source_agreement': 0.0}
+
+        # Check directional agreement: do sources agree on bullish/bearish?
+        directions = []
+        for s in source_sentiments.values():
+            if s > 0.01:
+                directions.append(1)
+            elif s < -0.01:
+                directions.append(-1)
+            else:
+                directions.append(0)
+
+        # Agreement = fraction of non-neutral sources sharing the majority direction
+        non_neutral = [d for d in directions if d != 0]
+        if not non_neutral:
+            return {'n_sources': n_sources, 'source_agreement': 0.0}
+
+        from collections import Counter
+        majority_dir = Counter(non_neutral).most_common(1)[0][0]
+        agreement = sum(1 for d in non_neutral if d == majority_dir) / n_sources
+
+        return {
+            'n_sources': n_sources,
+            'source_agreement': round(agreement, 3),
+        }
 
     def get_source_health(self) -> Dict[str, str]:
         """Return circuit breaker states for each source."""

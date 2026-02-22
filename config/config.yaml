@@ -19,9 +19,9 @@ data:
   # Alternatives: arctic_shift, gdelt, stocktwits, reddit, twitter
   social_media:
     source: "multi_source"  # "multi_source", "arctic_shift", "gdelt", "stocktwits", "reddit", "twitter"
-    max_posts_per_ticker: 300  # INCREASED to 300 for richer sentiment data (revised strategy)
-    days_before_event: 5  # INCREASED to 5 - capture pre-event leakage (research-backed)
-    days_after_event: 10  # INCREASED to 10 - capture full diffusion cycle
+    max_posts_per_ticker: 500  # Wider collection for higher confidence (was 300)
+    days_before_event: 10  # Wider baseline for reliable volume_ratio (was 7)
+    days_after_event: 3   # Event-day + 3 days max (academic event study standard; eliminates look-ahead bias)
     esg_keywords:  # ESG-related keywords (currently ignored - see reddit_fetcher.py)
       - "ESG"
       - "climate"
@@ -48,7 +48,7 @@ data:
   gdelt:
     use_mock: false  # Set to true for testing without API calls
     request_timeout: 30  # HTTP request timeout in seconds
-    max_articles: 50  # Maximum articles per search query
+    max_articles: 100  # More articles for richer sentiment signal (was 50)
 
   # StockTwits Configuration (Free, no credentials required)
   # Stock social media with native bullish/bearish sentiment
@@ -57,7 +57,7 @@ data:
   stocktwits:
     use_mock: false  # Set to true for testing without API calls
     request_timeout: 15  # HTTP request timeout in seconds
-    max_pages: 5  # Max pages to paginate backward per ticker
+    max_pages: 10  # More pages for deeper sentiment history (was 5)
 
   # Multi-Source Configuration
   # Combines multiple sources for richer sentiment data
@@ -100,7 +100,7 @@ nlp:
     # NOTE: This threshold should be validated via walk-forward testing
     # AUDIT WARNING: "LOWERED to increase trade count" is look-ahead bias
     # Use validation framework to find optimal threshold on training data only
-    confidence_threshold: 0.30
+    confidence_threshold: 0.25
 
   # Sentiment Analysis
   sentiment_analyzer:
@@ -121,11 +121,11 @@ signals:
   # Fixed weights (used when weight_derivation_method="fixed")
   # Note: These are legacy values - prefer statistical derivation
   weights:
-    event_severity: 0.15
-    intensity: 0.35
-    volume: 0.20
-    duration: 0.10
-    sentiment_volume_momentum: 0.20
+    event_severity: 0.20
+    intensity: 0.40
+    volume: 0.25
+    duration: 0.15
+    sentiment_volume_momentum: 0.0  # Removed: was double-counting intensity
 
   # Signal Parameters
   lookback_window: 252  # Days for z-score calculation and weight calibration
@@ -135,10 +135,11 @@ signals:
   # These ensure signals come from real data with sufficient coverage
   quality_filters:
     min_intensity: 0.05      # Minimum |sentiment| for signal
-    min_volume_ratio: 1.0    # LOWERED from 1.2: accept all events with posts
-    min_posts: 3             # LOWERED from 5 to 3: more signals for diversification
-    require_social_data: true  # Exclude events without social media validation
-    balance_long_short: true  # CHANGED: Force balanced L/S to prevent directional blowup
+    min_volume_ratio: 0.3    # Adjusted for 3-day post / 10-day pre window (baseline = 0.3)
+    min_posts: 5             # Minimum posts for reliable sentiment consensus (research: 5+)
+    require_social_data: true  # Require social media validation
+    min_confidence: 0.0      # Confidence floor (0 = no filter)
+    balance_long_short: true  # Force balanced L/S to prevent directional blowup
 
 # Walk-Forward Validation Configuration (AUDIT ADDITION Jan 2026)
 # CRITICAL: Use this to validate strategy before deployment
@@ -195,7 +196,7 @@ portfolio:
   method: "quintile"  # CHANGED: quintile for discrete ranking (z_score caused issues with sparse data)
   max_position: 0.08  # 8% for concentrated high-conviction positions
   rebalance_frequency: "W"  # Weekly - optimal for ESG event frequency
-  holding_period: 10  # FIX: Match days_after_event for full sentiment diffusion (was 7)
+  holding_period: 21  # Match ESG alpha lifecycle: academic evidence shows 20-60 day horizon
   balance_long_short: true  # CHANGED: Force balanced to prevent 8:1 short bias
 
 # Backtesting Configuration

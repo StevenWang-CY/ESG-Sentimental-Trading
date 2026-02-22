@@ -36,6 +36,19 @@ class SECFilingParser:
             '2.02': 'Results of Operations'
         }
 
+        # 10-K items containing ESG disclosures (Business, Risk Factors, MD&A)
+        self.esg_relevant_items_10k = {
+            '1': 'Business Description',
+            '1A': 'Risk Factors',
+            '7': "Management's Discussion and Analysis",
+        }
+
+        # 10-Q items containing ESG disclosures (Risk Factors, MD&A)
+        self.esg_relevant_items_10q = {
+            '1A': 'Risk Factors',
+            '2': "Management's Discussion and Analysis",
+        }
+
     def extract_text(self, filing_path: str) -> str:
         """
         Extract clean text from SEC filing
@@ -129,6 +142,10 @@ class SECFilingParser:
         """
         Extract only ESG-relevant sections from filing
 
+        For 8-K: Material event items (1.01, 2.05, 8.01, 2.02)
+        For 10-K: Business, Risk Factors, MD&A sections
+        For 10-Q: Risk Factors, MD&A sections
+
         Args:
             text: Filing text
             filing_type: Type of filing
@@ -136,14 +153,21 @@ class SECFilingParser:
         Returns:
             Combined text from ESG-relevant sections
         """
-        if filing_type != '8-K':
+        # Select the relevant items mapping based on filing type
+        if filing_type == '8-K':
+            relevant_items = self.esg_relevant_items
+        elif filing_type == '10-K':
+            relevant_items = self.esg_relevant_items_10k
+        elif filing_type == '10-Q':
+            relevant_items = self.esg_relevant_items_10q
+        else:
             return text
 
         items = self.extract_item_sections(text, filing_type)
 
         relevant_text = []
         for item_num, content in items.items():
-            if item_num in self.esg_relevant_items:
+            if item_num in relevant_items:
                 if isinstance(content, dict):
                     relevant_text.append(content['content'])
                 else:
