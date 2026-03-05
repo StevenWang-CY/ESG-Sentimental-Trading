@@ -303,7 +303,7 @@ fig.text(0.99, 0.01, f'Generated: {timestamp}', ha='right', fontsize=8,
          style='italic', color='gray')
 
 plt.tight_layout(rect=[0, 0.02, 1, 0.96])
-plt.savefig('/Users/chuyuewang/Desktop/Finance/Personal Projects/ESG-Sentimental-Trading/results/visualizations/COMPARISON_MEDIUM_vs_HIGH.png',
+plt.savefig('results/visualizations/COMPARISON_MEDIUM_vs_HIGH.png',
             dpi=300, bbox_inches='tight')
 print(f"✓ Comparison visualization saved: results/visualizations/COMPARISON_MEDIUM_vs_HIGH.png")
 
