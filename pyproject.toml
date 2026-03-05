@@ -61,9 +61,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-username/ESG-Sentimental-Trading"
-Repository = "https://github.com/your-username/ESG-Sentimental-Trading"
-Issues = "https://github.com/your-username/ESG-Sentimental-Trading/issues"
+Homepage = "https://github.com/StevenWang-CY/ESG-Sentimental-Trading"
+Repository = "https://github.com/StevenWang-CY/ESG-Sentimental-Trading"
+Issues = "https://github.com/StevenWang-CY/ESG-Sentimental-Trading/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

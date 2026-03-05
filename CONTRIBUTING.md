@@ -6,7 +6,7 @@ Thank you for your interest in contributing! This guide will help you get starte
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/your-username/ESG-Sentimental-Trading.git
+   git clone https://github.com/StevenWang-CY/ESG-Sentimental-Trading.git
    cd ESG-Sentimental-Trading
    ```
 

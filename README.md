@@ -294,7 +294,19 @@ ESG-Sentimental-Trading/
 │   └── NEXT_STEPS.md               # Future enhancements
 │
 ├── results/                        # Backtest outputs & tear sheets
-└── data/                           # Cached data files
+├── data/                           # Cached data files
+│
+├── LICENSE                         # MIT License
+├── CONTRIBUTING.md                 # Contribution guidelines
+├── CODE_OF_CONDUCT.md              # Community standards
+├── pyproject.toml                  # Python packaging & metadata
+├── requirements.txt                # Pinned dependencies
+├── .env.example                    # Environment variable template
+└── .github/                        # GitHub templates
+    ├── ISSUE_TEMPLATE/
+    │   ├── bug_report.md
+    │   └── feature_request.md
+    └── PULL_REQUEST_TEMPLATE.md
 ```
 
 ---
@@ -308,8 +320,11 @@ python --version  # 3.10+
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
+# Or install via pyproject.toml
+pip install -e .
+
 # Optional: Install FinBERT for transformer-based sentiment
-pip install transformers torch
+pip install -e ".[nlp]"
 ```
 
 ### Run a Demo
@@ -482,8 +497,8 @@ The **regime detector** identifies six market states (normal, high/low volatilit
 
 **Author**: Steven Wang
 **Email**: StevenWANG0805@outlook.com
-**GitHub**: [stevenwang2029/ESG-Sentimental-Trading](https://github.com/stevenwang2029/ESG-Sentimental-Trading)
+**GitHub**: [StevenWang-CY/ESG-Sentimental-Trading](https://github.com/StevenWang-CY/ESG-Sentimental-Trading)
 
 ---
 
-*Last Updated: February 2026 | Version 4.1.0*
+*Last Updated: March 2026 | Version 4.1.0*
