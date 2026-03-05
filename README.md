@@ -295,14 +295,6 @@ ESG-Sentimental-Trading/
 │   ├── debug_dates.py              # Date alignment debugging
 │   └── debug_prices.py             # Price data validation
 │
-├── docs/                           # Extended documentation
-│   ├── CONFIGURATION_GUIDE.md      # Parameter reference
-│   ├── IMPLEMENTATION_SUMMARY.md   # Architecture overview
-│   ├── TRADE_COUNT_ANALYSIS.md     # Signal generation diagnostics
-│   ├── OPTIMIZATION_NOTES.md       # Performance tuning notes
-│   ├── ACTION_ITEMS.md             # Development roadmap
-│   └── NEXT_STEPS.md               # Future enhancements
-│
 ├── results/                        # Backtest outputs & tear sheets
 ├── data/                           # Cached data files
 │
