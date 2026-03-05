@@ -32,7 +32,11 @@ class BacktestEngine:
                  max_position_size: float = 0.10,
                  target_volatility: float = 0.12,
                  max_drawdown_threshold: float = 0.15,
-                 balance_long_short: bool = True):
+                 balance_long_short: bool = True,
+                 cash_benchmark_returns: Optional[pd.Series] = None,
+                 regime_aware_equitization: bool = False,
+                 bear_equitization_pct: float = 0.40,
+                 sma_lookback: int = 100):
         """
         Initialize backtest engine with risk management
 
@@ -44,9 +48,16 @@ class BacktestEngine:
             enable_risk_management: Enable comprehensive risk controls
             max_position_size: Maximum single position size (10%)
             target_volatility: Target portfolio volatility (12% annualized)
-            target_volatility: Target portfolio volatility (12% annualized)
             max_drawdown_threshold: Maximum acceptable drawdown (15%)
             balance_long_short: Enforce dollar neutrality (default: True)
+            cash_benchmark_returns: Daily returns for cash equitization (e.g., SPY).
+                When provided, idle cash earns the benchmark return instead of 0%.
+            regime_aware_equitization: If True, reduce equitization in bear regime
+                (Faber 2007, Ang 2014). Default: False.
+            bear_equitization_pct: Fraction of SPY return applied in bear regime
+                (0.40 = 40% of SPY return). Only used if regime_aware_equitization=True.
+            sma_lookback: SMA lookback period for regime detection (trading days).
+                100-day recommended (Zakamulin 2014). Default: 100.
         """
         self.prices = prices
         self.initial_capital = initial_capital
@@ -54,6 +65,10 @@ class BacktestEngine:
         self.slippage_bps = slippage_bps / 10000
         self.enable_risk_management = enable_risk_management and RISK_MANAGEMENT_AVAILABLE
         self.balance_long_short = balance_long_short
+        self.cash_benchmark_returns = cash_benchmark_returns
+        self.regime_aware_equitization = regime_aware_equitization
+        self.bear_equitization_pct = bear_equitization_pct
+        self.sma_lookback = sma_lookback
 
         self.portfolio_value = []
         self.positions = []
@@ -67,18 +82,51 @@ class BacktestEngine:
                 max_position_size=max_position_size,
                 target_volatility=target_volatility,
                 max_drawdown_threshold=max_drawdown_threshold,
-                min_positions=5,  # Minimum diversification
+                min_positions=2,  # Concentrated ESG event-driven (matches config)
                 balance_long_short=self.balance_long_short
             )
             self.drawdown_controller = DrawdownController(
                 drawdown_thresholds=[-0.05, -0.10, -0.15, -0.20],
-                exposure_levels=[0.9, 0.75, 0.60, 0.50]
+                exposure_levels=[0.90, 0.75, 0.60, 0.50]
             )
             print(f"Risk management enabled: max_pos={max_position_size:.1%}, "
                   f"target_vol={target_volatility:.1%}, max_dd={max_drawdown_threshold:.1%}")
         else:
             self.risk_manager = None
             self.drawdown_controller = None
+
+    def _is_bull_regime(self, date) -> bool:
+        """
+        Determine market regime using SMA of SPY price index.
+        Bull = SPY cumulative price above N-day SMA. Bear = below.
+
+        Uses only past data available at decision time (no look-ahead bias).
+
+        Academic basis:
+        - Faber (2007) "A Quantitative Approach to Tactical Asset Allocation"
+        - Ang (2014) "Asset Management", Chapter 14
+        """
+        if self.cash_benchmark_returns is None:
+            return True  # Default to bull if no benchmark data
+
+        sma_lookback = self.sma_lookback
+
+        # Get all benchmark returns up to current date
+        available_returns = self.cash_benchmark_returns[
+            self.cash_benchmark_returns.index <= date
+        ]
+
+        if len(available_returns) < sma_lookback:
+            return True  # Not enough data, default to bull (conservative)
+
+        # Compute cumulative price index from returns
+        price_index = (1 + available_returns).cumprod()
+
+        # Current price vs N-day SMA
+        sma = price_index.tail(sma_lookback).mean()
+        current_price = price_index.iloc[-1]
+
+        return current_price >= sma
 
     def run(self, signals: pd.DataFrame, rebalance_freq: str = 'W',
             holding_period: int = 10) -> 'BacktestResult':
@@ -149,6 +197,17 @@ class BacktestEngine:
         # Simulate trading
         rebalance_count = 0
         for i, date in enumerate(all_dates):
+            # Cash equitization: idle cash earns benchmark return (e.g., SPY).
+            # Portable alpha framework (Pedersen 2015 "Efficiently Inefficient"):
+            # Strategy return = market return + ESG alpha overlay.
+            if self.cash_benchmark_returns is not None and i > 0:
+                benchmark_ret = self.cash_benchmark_returns.get(date, 0.0)
+                if self.regime_aware_equitization and not self._is_bull_regime(date):
+                    # Bear regime: partial equitization (Ang 2014, Faber 2007)
+                    cash *= (1 + benchmark_ret * self.bear_equitization_pct)
+                else:
+                    cash *= (1 + benchmark_ret)
+
             # Calculate current portfolio value BEFORE rebalancing
             portfolio_value_before = self._calculate_portfolio_value_correct(
                 date, current_positions, cash

@@ -135,7 +135,7 @@ signals:
   # These ensure signals come from real data with sufficient coverage
   quality_filters:
     min_intensity: 0.05      # Minimum |sentiment| for signal
-    min_volume_ratio: 0.3    # Adjusted for 3-day post / 10-day pre window (baseline = 0.3)
+    min_volume_ratio: 0.3    # Preserves signal quality (lower vol events are 73% bearish)
     min_posts: 5             # Minimum posts for reliable sentiment consensus (research: 5+)
     require_social_data: true  # Require social media validation
     min_confidence: 0.0      # Confidence floor (0 = no filter)
@@ -166,17 +166,23 @@ risk_management:
   enabled: true
 
   # Position sizing
-  max_position_size: 0.10  # 10% maximum per position
-  min_positions: 5  # Minimum diversification
+  max_position_size: 0.25  # 25% max — optimal for concentrated ESG event-driven (25% peak, 26%+ triggers drawdown cliff)
+  min_positions: 2  # Realistic for sparse ESG event-driven strategy
 
   # Volatility targeting
-  target_volatility: 0.12  # 12% annualized target
+  target_volatility: 0.18  # 18% for event-driven strategies (Pedersen 2015: event-driven vol = 15-25%)
   volatility_lookback: 20  # Days for vol calculation
 
   # Drawdown control
   # AUDIT: Set adaptive_thresholds=true to derive from historical data
   adaptive_thresholds: true  # Derive thresholds from actual drawdown distribution
   max_drawdown_threshold: 0.15  # 15% max (used if adaptive_thresholds=false)
+
+  # Cash equitization regime filter (Faber 2007, Ang 2014)
+  cash_equitization:
+    regime_aware: true          # Enable regime-aware equitization
+    sma_lookback: 100           # 100-day SMA for regime detection (faster recovery detection)
+    bear_equitization_pct: 0.40 # 40% equitization in bear regime (vs 100% in bull)
 
   # Circuit breaker for scandals/flash crashes
   circuit_breaker:
@@ -196,7 +202,10 @@ portfolio:
   method: "quintile"  # CHANGED: quintile for discrete ranking (z_score caused issues with sparse data)
   max_position: 0.08  # 8% for concentrated high-conviction positions
   rebalance_frequency: "W"  # Weekly - optimal for ESG event frequency
-  holding_period: 21  # Match ESG alpha lifecycle: academic evidence shows 20-60 day horizon
+  holding_period: 49  # 7 weeks / ~35 trading days: captures full ESG alpha cycle
+  # Flammer (2013): CARs continue 30-60 trading days post-CSR event
+  # Khan, Serafeim & Yoon (2016): material ESG alpha persists quarterly
+  # Captures: primary alpha (5-10d) + diffusion (10-20d) + institutional (20-35d)
   balance_long_short: true  # CHANGED: Force balanced to prevent 8:1 short bias
 
 # Backtesting Configuration

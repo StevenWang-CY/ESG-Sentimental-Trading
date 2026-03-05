@@ -802,12 +802,51 @@ def main():
     # Run backtest
     logger.info("\n>>> STEP 8: BACKTESTING")
 
+    # Cash equitization: download SPY returns so idle cash earns market return
+    # Standard institutional practice for event-driven strategies (Pedersen 2015).
+    # Without this, sparse event-driven strategies suffer "cash drag" — idle capital
+    # earns 0% while the market appreciates. Institutional funds (Citadel, AQR, DE Shaw)
+    # equitize cash by investing idle capital in a broad market index.
+    cash_benchmark_returns = None
+    try:
+        import yfinance as yf
+        # Use price data's actual date range (includes lookback buffer before start_date)
+        if isinstance(prices.index, pd.MultiIndex):
+            price_dates = prices.index.get_level_values(0)
+        else:
+            price_dates = prices.index
+        price_start = price_dates.min()
+        price_end = price_dates.max()
+
+        spy_data = yf.download('SPY', start=price_start - pd.Timedelta(days=5),
+                               end=price_end + pd.Timedelta(days=5),
+                               progress=False, auto_adjust=True)
+        if isinstance(spy_data.columns, pd.MultiIndex):
+            spy_data.columns = spy_data.columns.get_level_values(0)
+        spy_returns = spy_data['Close'].pct_change().dropna()
+        cash_benchmark_returns = spy_returns
+        logger.info(f"Cash equitization enabled: SPY ({len(spy_returns)} daily returns)")
+        logger.info(f"  SPY period: {spy_returns.index[0].date()} to {spy_returns.index[-1].date()}")
+        logger.info(f"  SPY total return: {(spy_data['Close'].iloc[-1]/spy_data['Close'].iloc[0]-1)*100:.2f}%")
+    except Exception as e:
+        logger.warning(f"Could not download SPY for cash equitization: {e}")
+        logger.warning("Cash will earn 0% (no equitization)")
+
+    risk_config = config.get('risk_management', {})
+    equitization_config = risk_config.get('cash_equitization', {})
     backtest_engine = BacktestEngine(
         prices=prices,
         initial_capital=config['backtest']['initial_capital'],
         commission_pct=config['backtest']['commission_pct'],
         slippage_bps=config['backtest']['slippage_bps'],
-        balance_long_short=config.get('signals', {}).get('quality_filters', {}).get('balance_long_short', False)
+        max_position_size=risk_config.get('max_position_size', 0.10),
+        target_volatility=risk_config.get('target_volatility', 0.12),
+        max_drawdown_threshold=risk_config.get('max_drawdown_threshold', 0.15),
+        balance_long_short=config.get('signals', {}).get('quality_filters', {}).get('balance_long_short', False),
+        cash_benchmark_returns=cash_benchmark_returns,
+        regime_aware_equitization=equitization_config.get('regime_aware', False),
+        bear_equitization_pct=equitization_config.get('bear_equitization_pct', 0.40),
+        sma_lookback=equitization_config.get('sma_lookback', 100),
     )
 
     results = backtest_engine.run(

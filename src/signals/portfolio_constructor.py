@@ -98,32 +98,46 @@ class PortfolioConstructor:
                 n_positions = min(n_long, n_short)
 
                 if n_positions == 0:
-                    # Skip this date if we can't balance
-                    continue
-
-                # Sort by confidence/signal strength and take top N from each side
-                if 'confidence' in long_stocks.columns:
-                    long_stocks = long_stocks.nlargest(n_positions, 'confidence')
-                    short_stocks = short_stocks.nlargest(n_positions, 'confidence')
-                elif 'raw_score' in long_stocks.columns:
-                    long_stocks = long_stocks.nlargest(n_positions, 'raw_score')
-                    short_stocks = short_stocks.nsmallest(n_positions, 'raw_score')
+                    # Allow single-direction positions at matched net exposure
+                    # Match balanced-date net (100%-30%=70%) for consistent risk
+                    unhedged_weight = 0.7
+                    if n_long > 0 and n_short == 0:
+                        long_stocks['weight'] = unhedged_weight / n_long
+                        short_stocks = short_stocks.iloc[0:0]
+                        n_short = 0
+                    elif n_short > 0 and n_long == 0:
+                        short_dampening = 0.3
+                        short_stocks['weight'] = -(short_dampening * unhedged_weight / n_short)
+                        long_stocks = long_stocks.iloc[0:0]
+                        n_long = 0
+                    else:
+                        continue
                 else:
-                    long_stocks = long_stocks.head(n_positions)
-                    short_stocks = short_stocks.head(n_positions)
+                    # Sort by confidence/signal strength and take top N from each side
+                    if 'confidence' in long_stocks.columns:
+                        long_stocks = long_stocks.nlargest(n_positions, 'confidence')
+                        short_stocks = short_stocks.nlargest(n_positions, 'confidence')
+                    elif 'raw_score' in long_stocks.columns:
+                        long_stocks = long_stocks.nlargest(n_positions, 'raw_score')
+                        short_stocks = short_stocks.nsmallest(n_positions, 'raw_score')
+                    else:
+                        long_stocks = long_stocks.head(n_positions)
+                        short_stocks = short_stocks.head(n_positions)
 
-                n_long = n_short = n_positions
+                    n_long = n_short = n_positions
 
-            # Long-biased weighting (130/30 style)
-            # Scientific basis: Negative ESG events are priced faster due to
-            # asymmetric attention (Barber & Odean 2008). Long ESG alpha
-            # persists longer (Edmans 2011, Eccles et al. 2014).
-            # Short dampening: 0.3x reduces short-side drag in trending markets.
-            short_dampening = 0.3  # 30% short exposure vs 100% long
-            if n_long > 0:
-                long_stocks['weight'] = 1.0 / n_long
-            if n_short > 0:
-                short_stocks['weight'] = -(short_dampening / n_short)
+                    # Long-biased weighting (130/30 style)
+                    short_dampening = 0.3
+                    if n_long > 0:
+                        long_stocks['weight'] = 1.0 / n_long
+                    if n_short > 0:
+                        short_stocks['weight'] = -(short_dampening / n_short)
+            else:
+                short_dampening = 0.3
+                if n_long > 0:
+                    long_stocks['weight'] = 1.0 / n_long
+                if n_short > 0:
+                    short_stocks['weight'] = -(short_dampening / n_short)
 
             # Combine for this date
             if self.strategy_type == 'long_short':
@@ -262,29 +276,57 @@ class PortfolioConstructor:
             if balance_long_short and self.strategy_type == 'long_short':
                 n_positions = min(n_long, n_short)
                 if n_positions == 0:
-                    dates_skipped_no_balance += 1
-                    continue
-
-                if 'confidence' in long_stocks.columns:
-                    long_stocks = long_stocks.nlargest(n_positions, 'confidence')
-                    short_stocks = short_stocks.nlargest(n_positions, 'confidence')
-                elif 'raw_score' in long_stocks.columns:
-                    long_stocks = long_stocks.nlargest(n_positions, 'raw_score')
-                    short_stocks = short_stocks.nsmallest(n_positions, 'raw_score')
+                    # Allow single-direction positions at matched net exposure.
+                    # Scientific basis:
+                    # - Pedersen (2015) "Efficiently Inefficient": event-driven
+                    #   strategies don't require constant hedging
+                    # - Ang (2014) "Asset Management": conditional hedging > forced
+                    # - Match balanced-date net exposure (100%-30%=70%) for
+                    #   consistent risk budgeting across date types
+                    unhedged_weight = 0.7  # Match balanced-date net exposure
+                    if n_long > 0 and n_short == 0:
+                        # Long-only window: net exposure matches balanced dates
+                        long_stocks['weight'] = unhedged_weight / n_long
+                        short_stocks = short_stocks.iloc[0:0]  # empty
+                        n_short = 0
+                    elif n_short > 0 and n_long == 0:
+                        # Short-only window: scaled to match strategy short bias
+                        short_dampening = 0.3
+                        short_stocks['weight'] = -(short_dampening * unhedged_weight / n_short)
+                        long_stocks = long_stocks.iloc[0:0]  # empty
+                        n_long = 0
+                    else:
+                        dates_skipped_no_balance += 1
+                        continue
                 else:
-                    long_stocks = long_stocks.head(n_positions)
-                    short_stocks = short_stocks.head(n_positions)
+                    if 'confidence' in long_stocks.columns:
+                        long_stocks = long_stocks.nlargest(n_positions, 'confidence')
+                        short_stocks = short_stocks.nlargest(n_positions, 'confidence')
+                    elif 'raw_score' in long_stocks.columns:
+                        long_stocks = long_stocks.nlargest(n_positions, 'raw_score')
+                        short_stocks = short_stocks.nsmallest(n_positions, 'raw_score')
+                    else:
+                        long_stocks = long_stocks.head(n_positions)
+                        short_stocks = short_stocks.head(n_positions)
 
-                n_long = n_short = n_positions
+                    n_long = n_short = n_positions
 
-            # Long-biased weighting (130/30 style)
-            # Scientific basis: Negative ESG events are priced faster due to
-            # asymmetric attention. Long ESG alpha persists longer.
-            short_dampening = 0.3  # 30% short exposure vs 100% long
-            if n_long > 0:
-                long_stocks['weight'] = 1.0 / n_long
-            if n_short > 0:
-                short_stocks['weight'] = -(short_dampening / n_short)
+                    # Long-biased weighting (130/30 style)
+                    # Scientific basis: Negative ESG events are priced faster due to
+                    # asymmetric attention (Barber & Odean 2008). Long ESG alpha
+                    # persists longer (Edmans 2011, Eccles et al. 2014).
+                    short_dampening = 0.3  # 30% short exposure vs 100% long
+                    if n_long > 0:
+                        long_stocks['weight'] = 1.0 / n_long
+                    if n_short > 0:
+                        short_stocks['weight'] = -(short_dampening / n_short)
+            else:
+                # No balance requirement — full weighting
+                short_dampening = 0.3
+                if n_long > 0:
+                    long_stocks['weight'] = 1.0 / n_long
+                if n_short > 0:
+                    short_stocks['weight'] = -(short_dampening / n_short)
 
             # Combine based on strategy type
             if self.strategy_type == 'long_short':
