@@ -1,5 +1,7 @@
 # ESG Event-Driven Alpha Strategy: Comprehensive Backtest Report
 
+> Historical artifact: this report predates the January 2026 strategy realignment. The canonical strategy is now defined by `run_production.py` plus `config/config.yaml`, and this report should be regenerated before being treated as current.
+
 **Period:** 2024-01-01 to 2025-10-01 (22 months)
 **Date Generated:** 2025-11-12
 **Objective:** Demonstrate strategy's true potential with >50 trades through optimized configuration

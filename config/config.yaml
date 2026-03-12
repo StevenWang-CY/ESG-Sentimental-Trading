@@ -7,7 +7,7 @@ data:
     company_name: "ESGQuantResearch"
     email: "research@example.com"  # REQUIRED: Your email for SEC EDGAR
     download_folder: "./data/raw/sec_filings"
-    filing_types: ["8-K", "10-K", "10-Q"]
+    filing_types: ["8-K"]  # Canonical trading trigger; periodic filings remain research-only
 
   # Price Data Configuration
   prices:
@@ -104,8 +104,10 @@ nlp:
 
   # Sentiment Analysis
   sentiment_analyzer:
+    mode: "hybrid"  # Canonical production mode: FinBERT + lexicon hybrid
     model: "ProsusAI/finbert"  # ProsusAI/finbert, yiyanghkust/finbert-tone
     batch_size: 32
+    strict: true  # Fail closed in production if canonical sentiment mode is unavailable
 
 # Signal Generation
 signals:
@@ -135,11 +137,11 @@ signals:
   # These ensure signals come from real data with sufficient coverage
   quality_filters:
     min_intensity: 0.05      # Minimum |sentiment| for signal
-    min_volume_ratio: 0.3    # Preserves signal quality (lower vol events are 73% bearish)
+    min_volume_ratio: 0.0    # Volume is a score component; canonical path does not hard-filter on it
     min_posts: 5             # Minimum posts for reliable sentiment consensus (research: 5+)
     require_social_data: true  # Require social media validation
     min_confidence: 0.0      # Confidence floor (0 = no filter)
-    balance_long_short: true  # Force balanced L/S to prevent directional blowup
+    balance_long_short: true  # Deprecated alias; use portfolio.selection_balance
 
 # Walk-Forward Validation Configuration (AUDIT ADDITION Jan 2026)
 # CRITICAL: Use this to validate strategy before deployment
@@ -166,8 +168,9 @@ risk_management:
   enabled: true
 
   # Position sizing
-  max_position_size: 0.25  # 25% max — optimal for concentrated ESG event-driven (25% peak, 26%+ triggers drawdown cliff)
+  max_position_size: 0.10  # Hard risk cap; canonical construction target remains 8%
   min_positions: 2  # Realistic for sparse ESG event-driven strategy
+  leverage_limit: 1.0  # Baseline strategy is dollar-neutral with 100% gross exposure
 
   # Volatility targeting
   target_volatility: 0.18  # 18% for event-driven strategies (Pedersen 2015: event-driven vol = 15-25%)
@@ -180,7 +183,8 @@ risk_management:
 
   # Cash equitization regime filter (Faber 2007, Ang 2014)
   cash_equitization:
-    regime_aware: true          # Enable regime-aware equitization
+    enabled: false              # Optional overlay; disabled for baseline validation
+    regime_aware: false         # Enable only when cash overlay is explicitly turned on
     sma_lookback: 100           # 100-day SMA for regime detection (faster recovery detection)
     bear_equitization_pct: 0.40 # 40% equitization in bear regime (vs 100% in bull)
 
@@ -200,13 +204,16 @@ risk_management:
 portfolio:
   strategy_type: "long_short"  # long_short, long_only, short_only
   method: "quintile"  # CHANGED: quintile for discrete ranking (z_score caused issues with sparse data)
+  selection_balance: "equal_count"  # Canonical candidate selection: equal long/short names
+  exposure_model: "dollar_neutral"  # Canonical portfolio exposure
+  gross_exposure_target: 1.0  # 50% gross long + 50% gross short
   max_position: 0.08  # 8% for concentrated high-conviction positions
   rebalance_frequency: "W"  # Weekly - optimal for ESG event frequency
   holding_period: 49  # 7 weeks / ~35 trading days: captures full ESG alpha cycle
   # Flammer (2013): CARs continue 30-60 trading days post-CSR event
   # Khan, Serafeim & Yoon (2016): material ESG alpha persists quarterly
   # Captures: primary alpha (5-10d) + diffusion (10-20d) + institutional (20-35d)
-  balance_long_short: true  # CHANGED: Force balanced to prevent 8:1 short bias
+  balance_long_short: true  # Deprecated alias; selection_balance replaces this
 
 # Backtesting Configuration
 backtest:

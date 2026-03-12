@@ -40,6 +40,9 @@ class StockTwitsFetcher:
                  enable_sentiment: bool = True,
                  request_timeout: int = 15,
                  max_pages: int = 10,
+                 sentiment_mode: str = 'hybrid',
+                 sentiment_model_name: str = "ProsusAI/finbert",
+                 strict_sentiment: bool = False,
                  **kwargs):
         """
         Initialize StockTwits fetcher.
@@ -65,7 +68,11 @@ class StockTwitsFetcher:
         if enable_sentiment:
             try:
                 from src.nlp.sentiment_analyzer import FinancialSentimentAnalyzer
-                self.sentiment_analyzer = FinancialSentimentAnalyzer()
+                self.sentiment_analyzer = FinancialSentimentAnalyzer(
+                    model_name=sentiment_model_name,
+                    mode=sentiment_mode,
+                    strict=strict_sentiment,
+                )
             except Exception:
                 pass
 
@@ -124,7 +131,7 @@ class StockTwitsFetcher:
 
     def fetch_tweets_for_event(self, ticker: str, event_date: datetime,
                                keywords: Optional[List[str]] = None,
-                               days_before: int = 3, days_after: int = 7,
+                               days_before: int = 10, days_after: int = 3,
                                max_results: int = 100) -> pd.DataFrame:
         """
         Fetch StockTwits messages around an ESG event.
@@ -303,7 +310,7 @@ class StockTwitsFetcher:
 
     def fetch_tweets_batch(self, tickers: List[str], event_dates: Dict[str, datetime],
                            keywords: Optional[List[str]] = None,
-                           days_before: int = 3, days_after: int = 7,
+                           days_before: int = 10, days_after: int = 3,
                            max_results_per_ticker: int = 50) -> Dict[str, pd.DataFrame]:
         """Fetch messages for multiple tickers."""
         results = {}

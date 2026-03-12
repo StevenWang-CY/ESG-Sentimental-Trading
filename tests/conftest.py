@@ -108,34 +108,72 @@ def sample_signals_df():
 
 @pytest.fixture
 def baseline_config():
-    """Baseline MEDIUM sensitivity configuration"""
+    """Canonical baseline configuration."""
     return {
         'nlp': {
             'event_detector': {
                 'confidence_threshold': 0.20
+            },
+            'sentiment_analyzer': {
+                'mode': 'hybrid',
+                'model': 'ProsusAI/finbert',
+                'batch_size': 32,
+                'strict': True,
             }
         },
         'portfolio': {
             'rebalance_frequency': 'W',
-            'holding_period': 7,
+            'holding_period': 49,
             'max_position': 0.1,
             'strategy_type': 'long_short',
-            'method': 'quintile'
+            'method': 'quintile',
+            'selection_balance': 'equal_count',
+            'exposure_model': 'dollar_neutral',
+            'gross_exposure_target': 1.0,
         },
         'data': {
+            'sec': {
+                'filing_types': ['8-K'],
+            },
             'social_media': {
-                'days_before_event': 3,
-                'days_after_event': 7
+                'source': 'multi_source',
+                'days_before_event': 10,
+                'days_after_event': 3,
+                'max_posts_per_ticker': 500,
             }
         },
         'signals': {
+            'weight_derivation_method': 'inverse_variance',
+            'lookback_window': 252,
             'weights': {
                 'event_severity': 0.20,
                 'intensity': 0.40,
                 'volume': 0.25,
                 'duration': 0.15,
                 'sentiment_volume_momentum': 0.0,
-            }
+            },
+            'quality_filters': {
+                'min_intensity': 0.05,
+                'min_volume_ratio': 0.0,
+                'min_posts': 5,
+                'require_social_data': True,
+                'min_confidence': 0.0,
+            },
+        },
+        'risk_management': {
+            'enabled': True,
+            'max_position_size': 0.10,
+            'min_positions': 2,
+            'target_volatility': 0.18,
+            'max_drawdown_threshold': 0.15,
+            'adaptive_thresholds': True,
+            'leverage_limit': 1.0,
+            'cash_equitization': {
+                'enabled': False,
+                'regime_aware': False,
+                'bear_equitization_pct': 0.40,
+                'sma_lookback': 100,
+            },
         },
         'backtest': {
             'initial_capital': 1000000.0,

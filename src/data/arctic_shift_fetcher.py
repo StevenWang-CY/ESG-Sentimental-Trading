@@ -62,6 +62,9 @@ class ArcticShiftFetcher:
                  min_relevance_score: float = 0.1,
                  subreddits: Optional[List[str]] = None,
                  request_timeout: int = 15,
+                 sentiment_mode: str = 'hybrid',
+                 sentiment_model_name: str = "ProsusAI/finbert",
+                 strict_sentiment: bool = False,
                  # Accept and ignore Reddit credential params for compatibility
                  client_id: Optional[str] = None,
                  client_secret: Optional[str] = None,
@@ -96,7 +99,11 @@ class ArcticShiftFetcher:
         if enable_sentiment:
             try:
                 from src.nlp.sentiment_analyzer import FinancialSentimentAnalyzer
-                self.sentiment_analyzer = FinancialSentimentAnalyzer()
+                self.sentiment_analyzer = FinancialSentimentAnalyzer(
+                    model_name=sentiment_model_name,
+                    mode=sentiment_mode,
+                    strict=strict_sentiment,
+                )
                 print("  Sentiment analyzer loaded for Arctic Shift filtering")
             except Exception as e:
                 print(f"Warning: Could not load sentiment analyzer: {e}")
@@ -261,8 +268,8 @@ class ArcticShiftFetcher:
 
     def fetch_tweets_for_event(self, ticker: str, event_date: datetime,
                                keywords: Optional[List[str]] = None,
-                               days_before: int = 7,
-                               days_after: int = 14,
+                               days_before: int = 10,
+                               days_after: int = 3,
                                max_results: int = 200) -> pd.DataFrame:
         """
         Fetch Reddit posts related to a ticker around an event date.
@@ -561,8 +568,8 @@ class ArcticShiftFetcher:
 
     def fetch_tweets_batch(self, tickers: List[str], event_dates: Dict[str, datetime],
                            keywords: Optional[List[str]] = None,
-                           days_before: int = 3,
-                           days_after: int = 7,
+                           days_before: int = 10,
+                           days_after: int = 3,
                            max_results_per_ticker: int = 100) -> Dict[str, pd.DataFrame]:
         """
         Fetch posts for multiple tickers/events.
@@ -595,7 +602,7 @@ class ArcticShiftFetcher:
         return results
 
     def _generate_mock_posts(self, ticker: str, event_date: datetime,
-                             days_before: int = 3, days_after: int = 7,
+                             days_before: int = 10, days_after: int = 3,
                              n_posts: int = 100) -> pd.DataFrame:
         """Generate mock data for testing (identical to RedditFetcher)."""
         np.random.seed(hash(ticker) % 2**32)

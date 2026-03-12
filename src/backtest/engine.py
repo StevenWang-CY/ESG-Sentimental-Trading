@@ -32,6 +32,8 @@ class BacktestEngine:
                  max_position_size: float = 0.10,
                  target_volatility: float = 0.12,
                  max_drawdown_threshold: float = 0.15,
+                 adaptive_drawdown_thresholds: bool = True,
+                 leverage_limit: float = 1.0,
                  balance_long_short: bool = True,
                  cash_benchmark_returns: Optional[pd.Series] = None,
                  regime_aware_equitization: bool = False,
@@ -69,6 +71,7 @@ class BacktestEngine:
         self.regime_aware_equitization = regime_aware_equitization
         self.bear_equitization_pct = bear_equitization_pct
         self.sma_lookback = sma_lookback
+        self.adaptive_drawdown_thresholds = adaptive_drawdown_thresholds
 
         self.portfolio_value = []
         self.positions = []
@@ -83,11 +86,12 @@ class BacktestEngine:
                 target_volatility=target_volatility,
                 max_drawdown_threshold=max_drawdown_threshold,
                 min_positions=2,  # Concentrated ESG event-driven (matches config)
+                leverage_limit=leverage_limit,
                 balance_long_short=self.balance_long_short
             )
             self.drawdown_controller = DrawdownController(
-                drawdown_thresholds=[-0.05, -0.10, -0.15, -0.20],
-                exposure_levels=[0.90, 0.75, 0.60, 0.50]
+                drawdown_thresholds=[-0.10, -0.15, -0.20, -0.25],
+                exposure_levels=[0.95, 0.85, 0.70, 0.50]
             )
             print(f"Risk management enabled: max_pos={max_position_size:.1%}, "
                   f"target_vol={target_volatility:.1%}, max_dd={max_drawdown_threshold:.1%}")
@@ -361,6 +365,16 @@ class BacktestEngine:
                 returns_series = pd.Series([r['return'] for r in self.daily_returns])
             else:
                 returns_series = None
+
+            if (
+                self.adaptive_drawdown_thresholds and
+                returns_series is not None and
+                len(returns_series) >= 60 and
+                self.drawdown_controller is not None
+            ):
+                self.drawdown_controller = DrawdownController.from_historical_data(
+                    returns_series
+                )
 
             # Apply comprehensive risk controls
             target_signals = self.risk_manager.apply_risk_controls(

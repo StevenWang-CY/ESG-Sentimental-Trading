@@ -45,6 +45,9 @@ class MultiSourceFetcher:
                  arctic_shift_config: Optional[Dict] = None,
                  gdelt_config: Optional[Dict] = None,
                  stocktwits_config: Optional[Dict] = None,
+                 sentiment_mode: str = 'hybrid',
+                 sentiment_model_name: str = "ProsusAI/finbert",
+                 strict_sentiment: bool = False,
                  min_sources: int = 1,
                  max_retries: int = 3,
                  per_source_timeout: float = 120.0,
@@ -80,6 +83,9 @@ class MultiSourceFetcher:
                     subreddits=config.get('subreddits', None),
                     request_timeout=config.get('request_timeout', 15),
                     enable_sentiment=enable_sentiment,
+                    sentiment_mode=sentiment_mode,
+                    sentiment_model_name=sentiment_model_name,
+                    strict_sentiment=strict_sentiment,
                 )
                 print("  [Multi-Source] Arctic Shift: initialized")
             except Exception as e:
@@ -94,6 +100,9 @@ class MultiSourceFetcher:
                     enable_sentiment=enable_sentiment,
                     request_timeout=config.get('request_timeout', 30),
                     max_articles=config.get('max_articles', 50),
+                    sentiment_mode=sentiment_mode,
+                    sentiment_model_name=sentiment_model_name,
+                    strict_sentiment=strict_sentiment,
                 )
                 print("  [Multi-Source] GDELT: initialized")
             except Exception as e:
@@ -108,6 +117,9 @@ class MultiSourceFetcher:
                     enable_sentiment=enable_sentiment,
                     request_timeout=config.get('request_timeout', 15),
                     max_pages=config.get('max_pages', 5),
+                    sentiment_mode=sentiment_mode,
+                    sentiment_model_name=sentiment_model_name,
+                    strict_sentiment=strict_sentiment,
                 )
                 print("  [Multi-Source] StockTwits: initialized")
             except Exception as e:
@@ -136,7 +148,7 @@ class MultiSourceFetcher:
 
     def fetch_tweets_for_event(self, ticker: str, event_date: datetime,
                                keywords: Optional[List[str]] = None,
-                               days_before: int = 3, days_after: int = 7,
+                               days_before: int = 10, days_after: int = 3,
                                max_results: int = 100) -> pd.DataFrame:
         """
         Fetch social/news data from all sources with atomic synchronization.

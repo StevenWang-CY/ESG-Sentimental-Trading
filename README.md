@@ -1,6 +1,6 @@
 # ESG Event-Driven Alpha Strategy
 
-A market-neutral long-short equity strategy that generates alpha by exploiting slow information diffusion around ESG (Environmental, Social, and Governance) events, combining hybrid NLP sentiment analysis with event-driven signals.
+A dollar-neutral long-short equity strategy that generates alpha by exploiting slow information diffusion around ESG (Environmental, Social, and Governance) events, combining hybrid NLP sentiment analysis with event-driven signals.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![Version](https://img.shields.io/badge/Version-5.0.0-blue)
@@ -9,6 +9,8 @@ A market-neutral long-short equity strategy that generates alpha by exploiting s
 ---
 
 ## Performance Highlights
+
+These summary figures and markdown reports are historical outputs from earlier runs. After the January 2026 strategy realignment, `run_production.py` plus `config/config.yaml` define the canonical strategy contract, and archived reports should be regenerated before being treated as current.
 
 **Best Backtest** (Jan 2024 -- Dec 2025, 24 months, ESG-sensitive NASDAQ-100):
 
@@ -30,7 +32,7 @@ A market-neutral long-short equity strategy that generates alpha by exploiting s
 | Sharpe Ratio | **0.51** | ~0.5 |
 | Max Drawdown | -30.94% | ~-25% |
 
-The strategy uses **regime-aware cash equitization** (Faber 2007, Ang 2014): idle cash is fully invested in SPY during bull markets (SPY above 100-day SMA) and partially de-equitized during bear markets, reducing drawdowns while preserving recovery upside.
+An optional **cash/SPY overlay** is supported for portable-alpha style equitization, but it is disabled by default in the canonical baseline configuration. Baseline validation is performed on the pure dollar-neutral book without this overlay.
 
 ---
 
@@ -194,12 +196,13 @@ When fewer than five signals exist on a given date, the system uses a tertile sp
 
 ### Stage 6: Portfolio Construction
 
-Signals are converted into portfolio weights under a long-biased market-neutral constraint:
+Signals are converted into portfolio weights under a dollar-neutral constraint:
 
-- All Q5 stocks receive equal positive weight (long side).
-- All Q1 stocks receive equal negative weight (short side) with a **0.3x dampening factor** (130/30 style). The dampening reflects the empirical finding that negative ESG events are priced faster due to asymmetric attention (Barber & Odean, 2008), while positive ESG alpha persists longer (Edmans, 2011; Eccles et al., 2014).
-- Long and short sides are **balanced**: the system selects equal numbers of positions on each side to prevent unintended directional exposure.
-- Individual positions are capped at 8% of portfolio value (10% in the risk layer).
+- All Q5 stocks receive equal positive weight across the long side.
+- All Q1 stocks receive equal negative weight across the short side.
+- Long and short candidate counts are balanced before exposure normalization.
+- Long and short sides each target 50% gross exposure by default, producing an approximately flat net book.
+- Individual positions are capped at 8% of portfolio value in construction and 10% in the risk layer.
 - The portfolio is rebalanced weekly, and positions are held for 49 days (7 weeks) to capture the full ESG alpha lifecycle: primary alpha (5--10d) + diffusion (10--20d) + institutional rebalancing (20--35d) (Flammer 2013; Khan, Serafeim & Yoon 2016).
 
 ---
@@ -208,8 +211,8 @@ Signals are converted into portfolio weights under a long-biased market-neutral 
 
 ```
 ESG-Sentimental-Trading/
-├── main.py                         # Runner: demo, full, data_only, backtest_only modes
-├── run_production.py               # Production backtest with 3-tier caching
+├── main.py                         # Demo / smoke-test harness only
+├── run_production.py               # Canonical production / backtest entrypoint
 ├── config/
 │   ├── config.yaml                 # All strategy parameters
 │   └── esg_keywords.json           # ESG keyword dictionaries
@@ -230,7 +233,7 @@ ESG-Sentimental-Trading/
 │   │
 │   ├── nlp/                        # Stages 2--3: Event detection & sentiment
 │   │   ├── event_detector.py       # Rule-based ESG event detection (150+ keywords)
-│   │   ├── advanced_sentiment_analyzer.py  # FinBERT + Lexicon hybrid (70/30)
+│   │   ├── advanced_sentiment_analyzer.py  # FinBERT + Lexicon hybrid
 │   │   ├── sentiment_analyzer.py   # Lightweight FinBERT-only wrapper
 │   │   ├── feature_extractor.py    # Stage 4: Reaction feature extraction
 │   │   ├── temporal_feature_extractor.py   # Extended temporal features
@@ -239,7 +242,7 @@ ESG-Sentimental-Trading/
 │   │
 │   ├── signals/                    # Stages 5--6: Scoring & portfolio
 │   │   ├── signal_generator.py     # Composite scoring + quintile ranking
-│   │   └── portfolio_constructor.py # Long-short portfolio assembly (130/30)
+│   │   └── portfolio_constructor.py # Dollar-neutral long-short portfolio assembly
 │   │
 │   ├── backtest/                   # Backtesting engine
 │   │   ├── engine.py               # Event-driven simulation with cash tracking
@@ -340,7 +343,7 @@ python main.py --mode demo
 ```bash
 # Multi-source sentiment (free, no credentials needed)
 python run_production.py \
-    --universe NASDAQ_100 \
+    --universe esg_nasdaq100 \
     --social-source multi_source \
     --start-date 2024-01-01 \
     --end-date 2025-01-01
@@ -349,20 +352,20 @@ python run_production.py \
 export REDDIT_CLIENT_ID="your_id"
 export REDDIT_CLIENT_SECRET="your_secret"
 python run_production.py \
-    --universe RUSSELL_MIDCAP \
+    --universe russell_midcap \
     --social-source reddit \
     --start-date 2024-01-01 \
     --end-date 2025-01-01 \
     --save-data
 
 # Re-run with cached data (skips API calls)
-python run_production.py --universe RUSSELL_MIDCAP --use-cache
+python run_production.py --universe russell_midcap --use-cache
 ```
 
 ### Walk-Forward Validation
 
 ```bash
-python main.py --mode=validate --config=config/config.yaml
+python -m pytest tests/unit/test_walk_forward_validator.py
 ```
 
 ---
@@ -378,7 +381,7 @@ nlp:
 
 signals:
   weight_derivation_method: "inverse_variance"  # "fixed", "equal", "inverse_variance", "correlation"
-  weights:                         # Used when method = "fixed"
+  weights:                         # Explicit baseline weights; validation may recalibrate in-sample only
     event_severity: 0.20
     intensity: 0.40
     volume: 0.25
@@ -389,14 +392,18 @@ portfolio:
   holding_period: 49               # 7 weeks (full ESG alpha lifecycle)
   rebalance_frequency: "W"         # Weekly
   max_position: 0.08               # 8% max per stock
-  balance_long_short: true         # Force balanced L/S
+  selection_balance: "equal_count"
+  exposure_model: "dollar_neutral"
+  gross_exposure_target: 1.0
 
 risk_management:
-  max_position_size: 0.25          # 25% max (concentrated event-driven)
+  max_position_size: 0.10          # Risk-layer hard cap
   target_volatility: 0.18          # 18% (event-driven range 15-25%)
   adaptive_thresholds: true        # Derive drawdown levels from data
+  leverage_limit: 1.0
   cash_equitization:
-    regime_aware: true             # Reduce SPY exposure in bear markets
+    enabled: false                 # Off by default in canonical baseline
+    regime_aware: false
     sma_lookback: 100              # 100-day SMA regime filter
     bear_equitization_pct: 0.40    # 40% equitization in bear regime
   circuit_breaker:

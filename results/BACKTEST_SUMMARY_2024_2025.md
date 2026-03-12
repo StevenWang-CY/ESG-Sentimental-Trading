@@ -1,5 +1,7 @@
 # ESG Event-Driven Alpha Strategy: Backtest Results (2024-2025)
 
+> Historical artifact: this report predates the January 2026 strategy realignment. The canonical strategy is now defined by `run_production.py` plus `config/config.yaml`, and this report should be regenerated before being treated as current.
+
 ## Configuration
 - **Period**: 2024-01-01 to 2025-10-01 (22 months, 699 trading days)
 - **Universe**: ESG-Sensitive NASDAQ-100 (MEDIUM sensitivity, 45 stocks)

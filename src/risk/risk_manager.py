@@ -27,13 +27,13 @@ class RiskManager:
     """
 
     def __init__(self,
-                 max_position_size: float = 0.05,      # 5% max per position
+                 max_position_size: float = 0.10,      # 10% hard cap per position
                  max_sector_exposure: float = 0.30,     # 30% max per sector
                  target_volatility: float = 0.18,       # FIX 4.1: 18% for event-driven (was 10%)
                  max_drawdown_threshold: float = 0.15,  # 15% max drawdown trigger
                  stop_loss_pct: float = 0.10,           # 10% stop loss per position
                  min_positions: int = 5,                 # FIX 4.1: 5 for sparse ESG events (was 10)
-                 leverage_limit: float = 1.5,           # Max 1.5x leverage
+                 leverage_limit: float = 1.0,           # Canonical neutral book gross exposure
                  balance_long_short: bool = True):      # Enforce dollar neutrality (default: True)
         """
         Initialize risk manager
@@ -111,25 +111,16 @@ class RiskManager:
         return portfolio
 
     def _apply_position_limits(self, portfolio: pd.DataFrame) -> pd.DataFrame:
-        """Limit individual position sizes with long-biased dampening.
-
-        Short positions are dampened to 30% of long position size.
-        Scientific basis: ESG event data has systematic negative sentiment bias
-        (75% bearish events from SEC filings). Short positions have higher
-        borrow costs and faster information incorporation (Barber & Odean 2008).
-        """
+        """Limit individual long and short positions symmetrically."""
         portfolio = portfolio.copy()
-        short_dampening = 0.3  # 30% short vs 100% long
 
-        # Cap long positions at max_position_size
         portfolio.loc[portfolio['weight'] > 0, 'weight'] = portfolio.loc[
             portfolio['weight'] > 0, 'weight'
         ].clip(upper=self.max_position_size)
 
-        # Cap short positions at max_position_size * dampening
         portfolio.loc[portfolio['weight'] < 0, 'weight'] = portfolio.loc[
             portfolio['weight'] < 0, 'weight'
-        ].clip(lower=-(self.max_position_size * short_dampening))
+        ].clip(lower=-self.max_position_size)
 
         return portfolio
 
@@ -230,20 +221,23 @@ class RiskManager:
 
     def _normalize_weights(self, portfolio: pd.DataFrame) -> pd.DataFrame:
         """
-        Normalize weights for long-short portfolio.
-
-        Preserves the long/short ratio from portfolio construction (e.g. 130/30)
-        instead of forcing dollar neutrality.  Dollar neutrality destroyed the
-        intentional long bias needed to compensate for systematic negative
-        sentiment in ESG event data (Barber & Odean 2008, Edmans 2011).
+        Normalize weights for a neutral long-short portfolio.
         """
         portfolio = portfolio.copy()
 
-        # SKIP normalization if disabled
         if not self.balance_long_short:
             return portfolio
 
-        # Preserve the ratio set by portfolio constructor — do NOT force neutrality
+        long_sum = portfolio.loc[portfolio['weight'] > 0, 'weight'].sum()
+        short_sum = portfolio.loc[portfolio['weight'] < 0, 'weight'].abs().sum()
+
+        if long_sum == 0 or short_sum == 0:
+            return portfolio.iloc[0:0].copy()
+
+        side_target = min(long_sum, short_sum)
+        portfolio.loc[portfolio['weight'] > 0, 'weight'] *= side_target / long_sum
+        portfolio.loc[portfolio['weight'] < 0, 'weight'] *= side_target / short_sum
+
         return portfolio
 
     def check_stop_loss(self,

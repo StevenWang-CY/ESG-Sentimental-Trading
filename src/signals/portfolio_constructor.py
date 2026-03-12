@@ -13,7 +13,13 @@ class PortfolioConstructor:
     Converts signals to portfolio weights
     """
 
-    def __init__(self, strategy_type: str = 'long_short'):
+    def __init__(
+        self,
+        strategy_type: str = 'long_short',
+        selection_balance: str = 'equal_count',
+        exposure_model: str = 'dollar_neutral',
+        gross_exposure_target: float = 1.0,
+    ):
         """
         Initialize portfolio constructor
 
@@ -21,10 +27,54 @@ class PortfolioConstructor:
             strategy_type: 'long_short', 'long_only', or 'short_only'
         """
         self.strategy_type = strategy_type
+        self.selection_balance = selection_balance
+        self.exposure_model = exposure_model
+        self.gross_exposure_target = gross_exposure_target
+
+    def _resolve_selection_balance(
+        self,
+        balance_long_short: Optional[bool] = None,
+        selection_balance: Optional[str] = None,
+    ) -> str:
+        if selection_balance is not None:
+            return selection_balance
+        if balance_long_short is False:
+            return 'none'
+        if balance_long_short is True:
+            return 'equal_count'
+        return self.selection_balance
+
+    def _resolve_exposure_model(self, exposure_model: Optional[str] = None) -> str:
+        return exposure_model or self.exposure_model
+
+    def _apply_side_targets(
+        self,
+        long_stocks: pd.DataFrame,
+        short_stocks: pd.DataFrame,
+        exposure_model: str,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        long_stocks = long_stocks.copy()
+        short_stocks = short_stocks.copy()
+
+        if exposure_model == 'dollar_neutral' and self.strategy_type == 'long_short':
+            side_target = self.gross_exposure_target / 2.0
+            if len(long_stocks) > 0:
+                long_stocks['weight'] = side_target / len(long_stocks)
+            if len(short_stocks) > 0:
+                short_stocks['weight'] = -(side_target / len(short_stocks))
+            return long_stocks, short_stocks
+
+        if len(long_stocks) > 0:
+            long_stocks['weight'] = 1.0 / len(long_stocks)
+        if len(short_stocks) > 0:
+            short_stocks['weight'] = -(1.0 / len(short_stocks))
+        return long_stocks, short_stocks
 
     def construct_portfolio(self, signals_df: pd.DataFrame,
                           method: str = 'quintile',
-                          balance_long_short: bool = True,
+                          balance_long_short: Optional[bool] = None,
+                          selection_balance: Optional[str] = None,
+                          exposure_model: Optional[str] = None,
                           window_days: int = 0,
                           rebalance_freq: str = 'W') -> pd.DataFrame:
         """
@@ -33,7 +83,9 @@ class PortfolioConstructor:
         Args:
             signals_df: DataFrame with columns [ticker, date, signal, quintile]
             method: 'quintile' or 'z_score'
-            balance_long_short: If True, enforce equal long/short positions
+            balance_long_short: Deprecated boolean alias for selection balance
+            selection_balance: 'equal_count' or 'none'
+            exposure_model: 'dollar_neutral' or legacy non-neutral modes
             window_days: Rolling window in calendar days for signal accumulation.
                          When > 0, uses rolling window to accumulate non-expired
                          signals at each rebalance date. When 0, uses legacy
@@ -46,22 +98,35 @@ class PortfolioConstructor:
         if signals_df.empty:
             return pd.DataFrame(columns=['ticker', 'date', 'weight'])
 
+        resolved_selection_balance = self._resolve_selection_balance(
+            balance_long_short=balance_long_short,
+            selection_balance=selection_balance,
+        )
+        resolved_exposure_model = self._resolve_exposure_model(exposure_model)
+
         if method == 'quintile':
             if window_days > 0:
                 return self._rolling_quintile_portfolio(
                     signals_df,
                     window_days=window_days,
                     rebalance_freq=rebalance_freq,
-                    balance_long_short=balance_long_short,
+                    selection_balance=resolved_selection_balance,
+                    exposure_model=resolved_exposure_model,
                 )
-            return self._quintile_portfolio(signals_df, balance_long_short=balance_long_short)
+            return self._quintile_portfolio(
+                signals_df,
+                selection_balance=resolved_selection_balance,
+                exposure_model=resolved_exposure_model,
+            )
         elif method == 'z_score':
-            return self._z_score_portfolio(signals_df)
+            return self._z_score_portfolio(signals_df, exposure_model=resolved_exposure_model)
         else:
             raise ValueError(f"Unknown method: {method}")
 
     def _quintile_portfolio(self, signals_df: pd.DataFrame,
-                            balance_long_short: bool = True) -> pd.DataFrame:
+                            selection_balance: Optional[str] = None,
+                            exposure_model: str = 'dollar_neutral',
+                            balance_long_short: Optional[bool] = None) -> pd.DataFrame:
         """
         Classic quintile approach: Long Q5, Short Q1
         CRITICAL: Weights are assigned PER DATE (not globally)
@@ -73,12 +138,17 @@ class PortfolioConstructor:
 
         Args:
             signals_df: Signals DataFrame
-            balance_long_short: If True, ensure equal number of longs and shorts
+            selection_balance: Whether to equalize long/short candidate counts
+            exposure_model: Target exposure model for final weights
 
         Returns:
             Portfolio weights DataFrame
         """
         signals_df = signals_df.copy()
+        selection_balance = self._resolve_selection_balance(
+            balance_long_short=balance_long_short,
+            selection_balance=selection_balance,
+        )
 
         # CRITICAL FIX: Group by date and assign weights within each date
         portfolio_list = []
@@ -94,24 +164,11 @@ class PortfolioConstructor:
             # ROOT CAUSE FIX #4: Balance long/short positions
             # Academic basis: Market-neutral requires equal long/short exposure
             # Imbalanced portfolios have unintended market beta
-            if balance_long_short and self.strategy_type == 'long_short':
+            if selection_balance == 'equal_count' and self.strategy_type == 'long_short':
                 n_positions = min(n_long, n_short)
 
                 if n_positions == 0:
-                    # Allow single-direction positions at matched net exposure
-                    # Match balanced-date net (100%-30%=70%) for consistent risk
-                    unhedged_weight = 0.7
-                    if n_long > 0 and n_short == 0:
-                        long_stocks['weight'] = unhedged_weight / n_long
-                        short_stocks = short_stocks.iloc[0:0]
-                        n_short = 0
-                    elif n_short > 0 and n_long == 0:
-                        short_dampening = 0.3
-                        short_stocks['weight'] = -(short_dampening * unhedged_weight / n_short)
-                        long_stocks = long_stocks.iloc[0:0]
-                        n_long = 0
-                    else:
-                        continue
+                    continue
                 else:
                     # Sort by confidence/signal strength and take top N from each side
                     if 'confidence' in long_stocks.columns:
@@ -126,18 +183,17 @@ class PortfolioConstructor:
 
                     n_long = n_short = n_positions
 
-                    # Long-biased weighting (130/30 style)
-                    short_dampening = 0.3
-                    if n_long > 0:
-                        long_stocks['weight'] = 1.0 / n_long
-                    if n_short > 0:
-                        short_stocks['weight'] = -(short_dampening / n_short)
+                    long_stocks, short_stocks = self._apply_side_targets(
+                        long_stocks,
+                        short_stocks,
+                        exposure_model=exposure_model,
+                    )
             else:
-                short_dampening = 0.3
-                if n_long > 0:
-                    long_stocks['weight'] = 1.0 / n_long
-                if n_short > 0:
-                    short_stocks['weight'] = -(short_dampening / n_short)
+                long_stocks, short_stocks = self._apply_side_targets(
+                    long_stocks,
+                    short_stocks,
+                    exposure_model=exposure_model,
+                )
 
             # Combine for this date
             if self.strategy_type == 'long_short':
@@ -172,7 +228,9 @@ class PortfolioConstructor:
     def _rolling_quintile_portfolio(self, signals_df: pd.DataFrame,
                                      window_days: int = 10,
                                      rebalance_freq: str = 'W',
-                                     balance_long_short: bool = True) -> pd.DataFrame:
+                                     selection_balance: Optional[str] = None,
+                                     exposure_model: str = 'dollar_neutral',
+                                     balance_long_short: Optional[bool] = None) -> pd.DataFrame:
         """
         Rolling-window quintile portfolio: accumulates non-expired signals
         into a cross-section at each rebalance date, then ranks and weights.
@@ -187,13 +245,18 @@ class PortfolioConstructor:
                         sentiment_intensity, confidence
             window_days: Calendar days to look back for active signals
             rebalance_freq: 'W' (weekly) or 'M' (monthly) grid frequency
-            balance_long_short: If True, enforce equal long/short positions
+            selection_balance: Whether to equalize long/short candidate counts
+            exposure_model: Target exposure model for final weights
 
         Returns:
             DataFrame [ticker, date, weight] with date = rebalance grid dates
         """
         signals_df = signals_df.copy()
         signals_df['date'] = pd.to_datetime(signals_df['date'])
+        selection_balance = self._resolve_selection_balance(
+            balance_long_short=balance_long_short,
+            selection_balance=selection_balance,
+        )
 
         # Generate rebalance grid
         min_date = signals_df['date'].min()
@@ -273,31 +336,11 @@ class PortfolioConstructor:
             n_long = len(long_stocks)
             n_short = len(short_stocks)
 
-            if balance_long_short and self.strategy_type == 'long_short':
+            if selection_balance == 'equal_count' and self.strategy_type == 'long_short':
                 n_positions = min(n_long, n_short)
                 if n_positions == 0:
-                    # Allow single-direction positions at matched net exposure.
-                    # Scientific basis:
-                    # - Pedersen (2015) "Efficiently Inefficient": event-driven
-                    #   strategies don't require constant hedging
-                    # - Ang (2014) "Asset Management": conditional hedging > forced
-                    # - Match balanced-date net exposure (100%-30%=70%) for
-                    #   consistent risk budgeting across date types
-                    unhedged_weight = 0.7  # Match balanced-date net exposure
-                    if n_long > 0 and n_short == 0:
-                        # Long-only window: net exposure matches balanced dates
-                        long_stocks['weight'] = unhedged_weight / n_long
-                        short_stocks = short_stocks.iloc[0:0]  # empty
-                        n_short = 0
-                    elif n_short > 0 and n_long == 0:
-                        # Short-only window: scaled to match strategy short bias
-                        short_dampening = 0.3
-                        short_stocks['weight'] = -(short_dampening * unhedged_weight / n_short)
-                        long_stocks = long_stocks.iloc[0:0]  # empty
-                        n_long = 0
-                    else:
-                        dates_skipped_no_balance += 1
-                        continue
+                    dates_skipped_no_balance += 1
+                    continue
                 else:
                     if 'confidence' in long_stocks.columns:
                         long_stocks = long_stocks.nlargest(n_positions, 'confidence')
@@ -311,22 +354,17 @@ class PortfolioConstructor:
 
                     n_long = n_short = n_positions
 
-                    # Long-biased weighting (130/30 style)
-                    # Scientific basis: Negative ESG events are priced faster due to
-                    # asymmetric attention (Barber & Odean 2008). Long ESG alpha
-                    # persists longer (Edmans 2011, Eccles et al. 2014).
-                    short_dampening = 0.3  # 30% short exposure vs 100% long
-                    if n_long > 0:
-                        long_stocks['weight'] = 1.0 / n_long
-                    if n_short > 0:
-                        short_stocks['weight'] = -(short_dampening / n_short)
+                    long_stocks, short_stocks = self._apply_side_targets(
+                        long_stocks,
+                        short_stocks,
+                        exposure_model=exposure_model,
+                    )
             else:
-                # No balance requirement — full weighting
-                short_dampening = 0.3
-                if n_long > 0:
-                    long_stocks['weight'] = 1.0 / n_long
-                if n_short > 0:
-                    short_stocks['weight'] = -(short_dampening / n_short)
+                long_stocks, short_stocks = self._apply_side_targets(
+                    long_stocks,
+                    short_stocks,
+                    exposure_model=exposure_model,
+                )
 
             # Combine based on strategy type
             if self.strategy_type == 'long_short':
@@ -365,7 +403,8 @@ class PortfolioConstructor:
             print(f"    Consider increasing window_days (currently {window_days})")
             return pd.DataFrame(columns=['ticker', 'date', 'weight'])
 
-    def _z_score_portfolio(self, signals_df: pd.DataFrame) -> pd.DataFrame:
+    def _z_score_portfolio(self, signals_df: pd.DataFrame,
+                           exposure_model: str = 'dollar_neutral') -> pd.DataFrame:
         """
         Continuous weighting by z-score
 
@@ -380,15 +419,16 @@ class PortfolioConstructor:
         # Use z_score as raw weight
         signals_df['raw_weight'] = signals_df['z_score']
 
-        # Normalize to dollar-neutral
+        # Normalize to the configured exposure model.
         long_sum = signals_df[signals_df['raw_weight'] > 0]['raw_weight'].sum()
         short_sum = signals_df[signals_df['raw_weight'] < 0]['raw_weight'].abs().sum()
+        side_target = self.gross_exposure_target / 2.0 if exposure_model == 'dollar_neutral' else 1.0
 
         def normalize_weight(x):
             if x > 0 and long_sum > 0:
-                return x / long_sum
+                return (x / long_sum) * side_target
             elif x < 0 and short_sum > 0:
-                return x / short_sum
+                return (x / short_sum) * side_target
             else:
                 return 0.0
 
@@ -419,17 +459,15 @@ class PortfolioConstructor:
         # Cap individual positions
         portfolio['weight'] = portfolio['weight'].clip(-max_position, max_position)
 
-        # Renormalize to maintain dollar neutrality
+        # Renormalize within each side while preserving sign.
         long_sum = portfolio[portfolio['weight'] > 0]['weight'].sum()
         short_sum = portfolio[portfolio['weight'] < 0]['weight'].abs().sum()
+        side_target = self.gross_exposure_target / 2.0 if self.exposure_model == 'dollar_neutral' else 1.0
 
         if long_sum > 0:
-            portfolio.loc[portfolio['weight'] > 0, 'weight'] /= long_sum
+            portfolio.loc[portfolio['weight'] > 0, 'weight'] *= side_target / long_sum
         if short_sum > 0:
-            # Normalize short weights to sum to -1.0 (preserving negative sign).
-            # short_sum is abs() of negatives (positive number), so divide by +short_sum.
-            # Previous bug: /= -short_sum flipped negative weights to positive.
-            portfolio.loc[portfolio['weight'] < 0, 'weight'] /= short_sum
+            portfolio.loc[portfolio['weight'] < 0, 'weight'] *= side_target / short_sum
 
         return portfolio
 

@@ -236,7 +236,10 @@ class RedditFetcher:
                  user_agent: Optional[str] = None,
                  use_mock: bool = False,
                  enable_sentiment: bool = True,
-                 min_relevance_score: float = 0.1):
+                 min_relevance_score: float = 0.1,
+                 sentiment_mode: str = 'hybrid',
+                 sentiment_model_name: str = "ProsusAI/finbert",
+                 strict_sentiment: bool = False):
         """
         Initialize Reddit fetcher with semantic & sentiment analysis
 
@@ -262,7 +265,11 @@ class RedditFetcher:
         if enable_sentiment:
             try:
                 from src.nlp.sentiment_analyzer import FinancialSentimentAnalyzer
-                self.sentiment_analyzer = FinancialSentimentAnalyzer()
+                self.sentiment_analyzer = FinancialSentimentAnalyzer(
+                    model_name=sentiment_model_name,
+                    mode=sentiment_mode,
+                    strict=strict_sentiment,
+                )
                 print("✓ Sentiment analyzer loaded for Reddit filtering")
             except Exception as e:
                 print(f"Warning: Could not load sentiment analyzer: {e}")
@@ -448,8 +455,8 @@ class RedditFetcher:
 
     def fetch_tweets_for_event(self, ticker: str, event_date: datetime,
                                  keywords: Optional[List[str]] = None,
-                                 days_before: int = 7,
-                                 days_after: int = 14,
+                                 days_before: int = 10,
+                                 days_after: int = 3,
                                  max_results: int = 200) -> pd.DataFrame:
         """
         Fetch Reddit posts related to a ticker around an event date.
@@ -682,8 +689,8 @@ class RedditFetcher:
 
     def fetch_tweets_batch(self, tickers: List[str], event_dates: Dict[str, datetime],
                             keywords: Optional[List[str]] = None,
-                            days_before: int = 3,
-                            days_after: int = 7,
+                            days_before: int = 10,
+                            days_after: int = 3,
                             max_results_per_ticker: int = 100) -> Dict[str, pd.DataFrame]:
         """
         Fetch Reddit posts for multiple tickers/events
@@ -751,7 +758,7 @@ class RedditFetcher:
         return ticker
 
     def _generate_mock_posts(self, ticker: str, event_date: datetime,
-                               days_before: int = 3, days_after: int = 7,
+                               days_before: int = 10, days_after: int = 3,
                                n_posts: int = 100) -> pd.DataFrame:
         """
         Generate realistic mock Reddit data for testing

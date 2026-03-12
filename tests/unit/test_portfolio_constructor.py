@@ -38,14 +38,16 @@ class TestPortfolioConstructor:
     def test_initialization(self, portfolio_constructor):
         """Test portfolio constructor initializes correctly"""
         assert portfolio_constructor.strategy_type == 'long_short'
+        assert portfolio_constructor.selection_balance == 'equal_count'
+        assert portfolio_constructor.exposure_model == 'dollar_neutral'
 
     def test_quintile_portfolio_per_date_weights(self, portfolio_constructor):
         """
-        Test per-date weight assignment with long-biased 130/30 weighting
+        Test per-date weight assignment under dollar-neutral sizing.
 
         Weights must be assigned per date, not globally.
-        Uses balance_long_short=False to test pure per-date weighting.
-        Longs get equal weight (1/n), shorts get dampened weight (0.3/n).
+        Uses balance_long_short=False to allow one-sided books per date while
+        preserving the neutral side target of 50% gross per side.
         """
         # Create signals across multiple dates
         signals_df = pd.DataFrame({
@@ -58,21 +60,21 @@ class TestPortfolioConstructor:
         portfolio = portfolio_constructor._quintile_portfolio(signals_df, balance_long_short=False)
 
         # Check date 2024-01-01 (2 longs, equal weight)
-        date1_positions = portfolio[portfolio['date'] == '2024-01-01']
+        date1_positions = portfolio[portfolio['date'] == pd.Timestamp('2024-01-01')]
         assert len(date1_positions) == 2
         for w in date1_positions['weight'].values:
-            assert w == pytest.approx(0.5)
+            assert w == pytest.approx(0.25)
 
-        # Check date 2024-01-02 (2 longs, 1 short with 0.3x dampening)
-        date2_positions = portfolio[portfolio['date'] == '2024-01-02']
+        # Check date 2024-01-02 (2 longs, 1 short with equal dollar side targets)
+        date2_positions = portfolio[portfolio['date'] == pd.Timestamp('2024-01-02')]
         assert len(date2_positions) == 3
 
         date2_weights = date2_positions.set_index('ticker')['weight']
-        # Longs: equal weight 1/2 = 0.5
-        assert date2_weights['MSFT'] == pytest.approx(0.5)
-        assert date2_weights['GOOGL'] == pytest.approx(0.5)
-        # Shorts: dampened -0.3/1 = -0.3 (130/30 style)
-        assert date2_weights['AMZN'] == pytest.approx(-0.3, rel=1e-5)
+        # Longs: each get half of the 50% long-side target
+        assert date2_weights['MSFT'] == pytest.approx(0.25)
+        assert date2_weights['GOOGL'] == pytest.approx(0.25)
+        # Short: gets the full 50% short-side target
+        assert date2_weights['AMZN'] == pytest.approx(-0.5, rel=1e-5)
 
     def test_position_limit_enforcement(self, portfolio_constructor):
         """Test apply_position_limits clips individual weights"""
@@ -95,7 +97,7 @@ class TestPortfolioConstructor:
         assert len(limited_portfolio) == 4
 
     def test_long_short_balance(self, portfolio_constructor):
-        """Test long-short portfolio maintains balance"""
+        """Test long-short portfolio is dollar neutral."""
         # Create signals with proper signs (Fix #9: sign validation)
         signals_df = pd.DataFrame({
             'date': pd.to_datetime(['2024-01-01'] * 6),
@@ -106,17 +108,13 @@ class TestPortfolioConstructor:
 
         portfolio = portfolio_constructor._quintile_portfolio(signals_df)
 
-        # With long-biased 130/30 weighting:
-        # Long exposure = 1.0, Short exposure = -0.3, Net = 0.7
         long_exposure = portfolio[portfolio['weight'] > 0]['weight'].sum()
         short_exposure = portfolio[portfolio['weight'] < 0]['weight'].sum()
 
-        # Long positions should be fully weighted
-        assert long_exposure == pytest.approx(1.0, abs=0.01)
-        # Short positions should be dampened (0.3x)
-        assert short_exposure == pytest.approx(-0.3, abs=0.01)
-        # Net long bias
-        assert portfolio['weight'].sum() == pytest.approx(0.7, abs=0.01)
+        assert long_exposure == pytest.approx(0.5, abs=0.01)
+        assert short_exposure == pytest.approx(-0.5, abs=0.01)
+        assert portfolio['weight'].sum() == pytest.approx(0.0, abs=0.01)
+        assert portfolio['weight'].abs().sum() == pytest.approx(1.0, abs=0.01)
 
     def test_long_only_strategy(self):
         """Test long-only portfolio construction"""
@@ -204,6 +202,7 @@ class TestPortfolioConstructor:
         # Should still create portfolio with only longs
         assert len(portfolio) == 2  # Only Q5
         assert (portfolio['weight'] > 0).all()
+        assert portfolio['weight'].sum() == pytest.approx(0.5)
 
     def test_only_shorts_no_longs(self, portfolio_constructor):
         """Test portfolio with only short signals (no Q5) and balance disabled"""
@@ -220,6 +219,7 @@ class TestPortfolioConstructor:
         # Should still create portfolio with only shorts
         assert len(portfolio) == 2  # Only Q1
         assert (portfolio['weight'] < 0).all()
+        assert portfolio['weight'].sum() == pytest.approx(-0.5)
 
 
 class TestPortfolioConstructorRootCauseFixes:
@@ -253,19 +253,19 @@ class TestPortfolioConstructorRootCauseFixes:
         portfolio = portfolio_constructor._quintile_portfolio(signals_df, balance_long_short=False)
 
         # Date 1: 2 longs → each should be 1/2 = 0.5
-        date1_weights = portfolio[portfolio['date'] == '2024-01-01']['weight'].values
+        date1_weights = portfolio[portfolio['date'] == pd.Timestamp('2024-01-01')]['weight'].values
         assert len(date1_weights) == 2
-        assert all(w == pytest.approx(0.5) for w in date1_weights)
+        assert all(w == pytest.approx(0.25) for w in date1_weights)
 
-        # Date 2: 4 longs → each should be 1/4 = 0.25
-        date2_weights = portfolio[portfolio['date'] == '2024-01-02']['weight'].values
+        # Date 2: 4 longs share the 50% long-side target
+        date2_weights = portfolio[portfolio['date'] == pd.Timestamp('2024-01-02')]['weight'].values
         assert len(date2_weights) == 4
-        assert all(w == pytest.approx(0.25) for w in date2_weights)
+        assert all(w == pytest.approx(0.125) for w in date2_weights)
 
         # WRONG implementation would give global equal weighting:
-        # All 6 longs globally → each 1/6 = 0.167
+        # All 6 longs globally under the 50% side target → each 0.083
         # Verify this is NOT the case
-        assert not all(abs(w - 0.167) < 0.01 for w in portfolio['weight'].values)
+        assert not all(abs(w - 0.083) < 0.01 for w in portfolio['weight'].values)
 
     def test_concentration_risk_medium_vs_high(self, portfolio_constructor):
         """

@@ -153,20 +153,30 @@ class ESGSensitiveUniverse:
         Returns:
             List of ticker symbols
         """
+        normalized_threshold = sensitivity_threshold.upper()
         all_tickers = []
+        from .universe_fetcher import UniverseFetcher
 
-        if sensitivity_threshold in ['VERY HIGH', 'HIGH', 'MEDIUM', 'ALL']:
+        nasdaq100_constituents = set(UniverseFetcher()._get_hardcoded_nasdaq100())
+
+        if normalized_threshold == 'ALL':
+            tickers = sorted(nasdaq100_constituents)
+            print(f"\nESG-Sensitive NASDAQ-100 (threshold: {normalized_threshold})")
+            print(f"Total tickers: {len(tickers)}")
+            return tickers
+
+        if normalized_threshold in ['VERY HIGH', 'HIGH', 'MEDIUM']:
             # Energy & Materials (VERY HIGH)
             all_tickers.extend(self.ESG_SENSITIVE_NASDAQ100['energy'])
             all_tickers.extend(self.ESG_SENSITIVE_NASDAQ100['materials'])
 
-        if sensitivity_threshold in ['HIGH', 'MEDIUM', 'ALL']:
+        if normalized_threshold in ['HIGH', 'MEDIUM']:
             # Consumer & Industrials (HIGH)
             all_tickers.extend(self.ESG_SENSITIVE_NASDAQ100['consumer'])
             all_tickers.extend(self.ESG_SENSITIVE_NASDAQ100['industrials'])
             all_tickers.extend(self.ESG_SENSITIVE_NASDAQ100['food'])
 
-        if sensitivity_threshold in ['MEDIUM', 'ALL']:
+        if normalized_threshold in ['MEDIUM']:
             # Tech, Healthcare, Financials (MEDIUM-HIGH)
             all_tickers.extend(self.ESG_SENSITIVE_NASDAQ100['tech_esg'])
             all_tickers.extend(self.ESG_SENSITIVE_NASDAQ100['healthcare'])
@@ -174,9 +184,12 @@ class ESGSensitiveUniverse:
             all_tickers.extend(self.ESG_SENSITIVE_NASDAQ100['semis'])
 
         # Remove duplicates and sort
-        tickers = sorted(list(set(all_tickers)))
+        # Keep the ESG ladder anchored to the actual NASDAQ-100 universe so
+        # sensitivity tiers are always subsets of ALL, even if the curated ESG
+        # lists contain stale names.
+        tickers = sorted(set(all_tickers).intersection(nasdaq100_constituents))
 
-        print(f"\nESG-Sensitive NASDAQ-100 (threshold: {sensitivity_threshold})")
+        print(f"\nESG-Sensitive NASDAQ-100 (threshold: {normalized_threshold})")
         print(f"Total tickers: {len(tickers)}")
 
         return tickers

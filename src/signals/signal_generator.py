@@ -197,6 +197,20 @@ class WeightDerivationMethod(Enum):
     INVERSE_VARIANCE = auto()   # Lower variance = higher weight
     CORRELATION_BASED = auto()  # Higher return correlation = higher weight
 
+    @classmethod
+    def from_string(cls, value: str | None) -> "WeightDerivationMethod":
+        normalized = (value or 'fixed').strip().lower()
+        mapping = {
+            'fixed': cls.FIXED,
+            'equal': cls.EQUAL,
+            'inverse_variance': cls.INVERSE_VARIANCE,
+            'correlation': cls.CORRELATION_BASED,
+            'correlation_based': cls.CORRELATION_BASED,
+        }
+        if normalized not in mapping:
+            raise ValueError(f"Unknown weight derivation method: {value}")
+        return mapping[normalized]
+
 
 @dataclass(frozen=True)
 class ValidatedWeights:

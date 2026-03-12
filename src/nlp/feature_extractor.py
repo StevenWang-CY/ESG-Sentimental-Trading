@@ -48,15 +48,21 @@ class ReactionFeatureExtractor:
         if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
             df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-        # Analyze sentiment for all texts
-        if 'text' in df.columns:
-            texts = df['text'].fillna('').astype(str).tolist()
-            sentiments = self.sentiment_analyzer.analyze_batch(texts)
-            df['sentiment_score'] = [
-                self.sentiment_analyzer.score_to_numeric(s) for s in sentiments
-            ]
+        # Reuse pre-scored sentiment when fetchers already provide it. Only score
+        # missing rows so the canonical runner has one consistent sentiment path.
+        if 'sentiment' in df.columns:
+            df['sentiment_score'] = pd.to_numeric(df['sentiment'], errors='coerce')
         else:
-            df['sentiment_score'] = 0.0
+            df['sentiment_score'] = np.nan
+
+        if df['sentiment_score'].isna().any() and 'text' in df.columns:
+            missing_mask = df['sentiment_score'].isna()
+            texts = df.loc[missing_mask, 'text'].fillna('').astype(str).tolist()
+            sentiments = self.sentiment_analyzer.analyze_batch(texts)
+            scored = [self.sentiment_analyzer.score_to_numeric(s) for s in sentiments]
+            df.loc[missing_mask, 'sentiment_score'] = scored
+
+        df['sentiment_score'] = df['sentiment_score'].fillna(0.0)
 
         # Calculate days since event
         df['days_since_event'] = (df['timestamp'] - event_date).dt.total_seconds() / 86400
@@ -98,7 +104,8 @@ class ReactionFeatureExtractor:
             'pre_event_sentiment': pre_event_sentiment,
             'n_tweets': len(df),
             'n_pre_event': len(pre_event),
-            'n_post_event': len(post_event)
+            'n_post_event': len(post_event),
+            'sentiment_mode': getattr(self.sentiment_analyzer, 'active_mode', 'unknown'),
         }
 
     def _calculate_intensity(self, post_event: pd.DataFrame) -> float:
@@ -233,7 +240,8 @@ class ReactionFeatureExtractor:
             'pre_event_sentiment': 0.0,
             'n_tweets': 0,
             'n_pre_event': 0,
-            'n_post_event': 0
+            'n_post_event': 0,
+            'sentiment_mode': getattr(self.sentiment_analyzer, 'active_mode', 'unknown'),
         }
 
     def create_mock_social_data(self, ticker: str, event_date: datetime,

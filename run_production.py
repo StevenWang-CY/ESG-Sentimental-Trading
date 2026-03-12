@@ -31,12 +31,15 @@ import sys
 
 # Import project modules
 from src.utils.logging_config import setup_logging
+from src.utils.strategy_config import load_strategy_spec
+from src.utils.date_validator import DateValidator
 from src.utils.cache_manager import compute_config_hash, is_cache_fresh, build_cache_key
 from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher, RedditFetcher, ArcticShiftFetcher, GDELTFetcher, StockTwitsFetcher, MultiSourceFetcher
 from src.data.universe_fetcher import UniverseFetcher
 from src.preprocessing import SECFilingParser, TextCleaner
 from src.nlp import ESGEventDetector, FinancialSentimentAnalyzer, ReactionFeatureExtractor
 from src.signals import ESGSignalGenerator, PortfolioConstructor
+from src.signals.signal_generator import WeightDerivationMethod
 from src.backtest import BacktestEngine, PerformanceAnalyzer, FactorAnalysis
 
 
@@ -236,6 +239,9 @@ def main():
     if args.social_source:
         config['data']['social_media']['source'] = args.social_source
 
+    # Recompute canonical runtime spec after CLI overrides
+    strategy_spec = load_strategy_spec(config)
+
     # Validate social media configuration
     if args.force_real_social_media:
         source = config['data']['social_media'].get('source', 'arctic_shift')
@@ -246,6 +252,7 @@ def main():
         else:
             config['data']['twitter']['use_mock'] = False
 
+    strategy_spec = load_strategy_spec(config)
     use_real_data, social_source = validate_social_media_config(config)
 
     # Step 1: Get stock universe
@@ -295,8 +302,8 @@ def main():
     # Step 2: Download SEC filings
     logger.info("\n>>> STEP 2: DOWNLOADING SEC FILINGS")
 
-    # Read configured filing types
-    filing_types = config['data']['sec'].get('filing_types', ['8-K'])
+    # Read canonical filing types from the shared strategy spec
+    filing_types = strategy_spec.filing_types
     filing_type_suffix = '_'.join(ft.replace('-', '') for ft in sorted(filing_types))
 
     # Build cache key for SEC filings (includes filing types for cache invalidation)
@@ -416,14 +423,38 @@ def main():
     }.get(social_source, social_source)
     logger.info(f"\n>>> STEP 5: EVENT DETECTION & {source_name.upper()} SENTIMENT ANALYSIS")
 
+    date_validator = DateValidator(args.start_date, args.end_date, strict_mode=False)
+    sentiment_analyzer = FinancialSentimentAnalyzer(
+        model_name=strategy_spec.sentiment.model_name,
+        mode=strategy_spec.sentiment.mode,
+        batch_size=strategy_spec.sentiment.batch_size,
+        strict=strategy_spec.sentiment.strict,
+    )
+    logger.info(
+        "Sentiment analyzer initialized: requested=%s active=%s",
+        sentiment_analyzer.requested_mode,
+        sentiment_analyzer.active_mode,
+    )
+    expected_sentiment_mode = strategy_spec.sentiment.mode.lower()
+    if sentiment_analyzer.active_mode != expected_sentiment_mode:
+        raise RuntimeError(
+            "Canonical production sentiment mode is unavailable: "
+            f"requested={expected_sentiment_mode}, active={sentiment_analyzer.active_mode}"
+        )
+    feature_extractor = ReactionFeatureExtractor(sentiment_analyzer)
+
     # Compute config hash for events cache (depends on NLP parameters)
     nlp_config_keys = [
         'nlp.event_detector.confidence_threshold',
         'nlp.event_detector.type',
+        'nlp.sentiment_analyzer.mode',
         'nlp.sentiment_analyzer.model',
+        'nlp.sentiment_analyzer.strict',
+        'data.social_media.source',
         'data.social_media.days_before_event',
         'data.social_media.days_after_event',
         'data.social_media.max_posts_per_ticker',
+        'data.multi_source.sources',
         'data.sec.filing_types'
     ]
     nlp_hash = compute_config_hash(config, nlp_config_keys)
@@ -442,6 +473,7 @@ def main():
         logger.info(f"✓ Loading cached events from {events_cache_file.name}")
         logger.info(f"  Config hash: {nlp_hash} (NLP parameters unchanged)")
         events_data = pd.read_pickle(events_cache_file)
+        events_data = date_validator.validate_events(events_data)
         logger.info(f"Loaded {len(events_data)} cached ESG events")
     else:
         # Process events from scratch
@@ -456,8 +488,6 @@ def main():
         filing_parser = SECFilingParser()
         text_cleaner = TextCleaner()
         event_detector = ESGEventDetector()
-        sentiment_analyzer = FinancialSentimentAnalyzer()
-        feature_extractor = ReactionFeatureExtractor(sentiment_analyzer)
 
         # Initialize social media fetcher (Arctic Shift, Reddit, or Twitter)
         social_media_config = config['data']['social_media']
@@ -473,6 +503,9 @@ def main():
                 arctic_shift_config=arctic_config,
                 gdelt_config=gdelt_config,
                 stocktwits_config=stocktwits_config,
+                sentiment_mode=strategy_spec.sentiment.mode,
+                sentiment_model_name=strategy_spec.sentiment.model_name,
+                strict_sentiment=strategy_spec.sentiment.strict,
             )
         elif social_source == 'arctic_shift':
             arctic_config = config['data'].get('arctic_shift', {})
@@ -480,6 +513,9 @@ def main():
                 use_mock=arctic_config.get('use_mock', False),
                 subreddits=arctic_config.get('subreddits', None),
                 request_timeout=arctic_config.get('request_timeout', 15),
+                sentiment_mode=strategy_spec.sentiment.mode,
+                sentiment_model_name=strategy_spec.sentiment.model_name,
+                strict_sentiment=strategy_spec.sentiment.strict,
             )
         elif social_source == 'gdelt':
             gdelt_config = config['data'].get('gdelt', {})
@@ -487,6 +523,9 @@ def main():
                 use_mock=gdelt_config.get('use_mock', False),
                 request_timeout=gdelt_config.get('request_timeout', 30),
                 max_articles=gdelt_config.get('max_articles', 50),
+                sentiment_mode=strategy_spec.sentiment.mode,
+                sentiment_model_name=strategy_spec.sentiment.model_name,
+                strict_sentiment=strategy_spec.sentiment.strict,
             )
         elif social_source == 'stocktwits':
             stocktwits_config = config['data'].get('stocktwits', {})
@@ -494,6 +533,9 @@ def main():
                 use_mock=stocktwits_config.get('use_mock', False),
                 request_timeout=stocktwits_config.get('request_timeout', 15),
                 max_pages=stocktwits_config.get('max_pages', 5),
+                sentiment_mode=strategy_spec.sentiment.mode,
+                sentiment_model_name=strategy_spec.sentiment.model_name,
+                strict_sentiment=strategy_spec.sentiment.strict,
             )
         elif social_source == 'reddit':
             reddit_config = config['data']['reddit']
@@ -501,7 +543,10 @@ def main():
                 client_id=reddit_config.get('client_id'),
                 client_secret=reddit_config.get('client_secret'),
                 user_agent=reddit_config.get('user_agent', 'ESG Sentiment Trading Bot 1.0'),
-                use_mock=reddit_config.get('use_mock', True)
+                use_mock=reddit_config.get('use_mock', True),
+                sentiment_mode=strategy_spec.sentiment.mode,
+                sentiment_model_name=strategy_spec.sentiment.model_name,
+                strict_sentiment=strategy_spec.sentiment.strict,
             )
         else:  # twitter
             twitter_config = config['data']['twitter']
@@ -518,7 +563,7 @@ def main():
         events_data = []
 
         # Extract confidence threshold from config (fixes bug where config value was ignored)
-        confidence_threshold = config['nlp']['event_detector']['confidence_threshold']
+        confidence_threshold = strategy_spec.event_confidence_threshold
 
         # Filing-type-specific thresholds:
         # 8-K filings report MATERIAL EVENTS (new information) → use config threshold
@@ -532,43 +577,7 @@ def main():
         logger.info(f"  8-K (material events): {confidence_threshold}")
         logger.info(f"  10-K/10-Q (periodic reports): {confidence_threshold_periodic}")
 
-        # FIX 1.2: Defensive date filtering (second layer of defense)
-        # Filter out any filings that somehow got through with wrong dates
-        original_count = len(all_filings)
-        start_dt = datetime.strptime(args.start_date, '%Y-%m-%d')
-        end_dt = datetime.strptime(args.end_date, '%Y-%m-%d')
-
-        valid_filings = []
-        filtered_out = []
-
-        for filing in all_filings:
-            try:
-                filing_date = datetime.strptime(filing.get('date', args.start_date), '%Y-%m-%d')
-
-                if start_dt <= filing_date <= end_dt:
-                    valid_filings.append(filing)
-                else:
-                    filtered_out.append((filing['ticker'], filing.get('date', 'UNKNOWN')))
-            except ValueError as e:
-                logger.warning(f"⚠ Invalid date format in filing: {filing.get('date')}")
-                filtered_out.append((filing['ticker'], filing.get('date', 'INVALID')))
-
-        # Log filtering statistics
-        filtered_count = len(filtered_out)
-        if filtered_count > 0:
-            logger.warning(f"⚠ Filtered {filtered_count}/{original_count} filings outside date range:")
-            for ticker, date in filtered_out[:5]:  # Show first 5
-                logger.warning(f"  - {ticker}: {date}")
-            if filtered_count > 5:
-                logger.warning(f"  ... and {filtered_count - 5} more")
-
-            # Alert if >10% filtered (indicates upstream bug)
-            if filtered_count / original_count > 0.10:
-                logger.error(f"⚠⚠⚠ WARNING: {filtered_count/original_count*100:.1f}% of filings were outside date range!")
-                logger.error(f"    This suggests the SEC downloader may not be filtering correctly.")
-                logger.error(f"    Expected: {args.start_date} to {args.end_date}")
-
-        all_filings = valid_filings  # Replace with filtered list
+        all_filings = date_validator.validate_filings(all_filings)
         logger.info(f"Valid filings for event detection: {len(all_filings)}")
 
         for i, filing in enumerate(all_filings):
@@ -604,9 +613,9 @@ def main():
                     event_date = datetime.strptime(filing.get('date', args.start_date), '%Y-%m-%d')
 
                     # Build per-event cache for social media posts
-                    days_before = social_media_config.get('days_before_event', 3)
-                    days_after = social_media_config.get('days_after_event', 7)
-                    max_results = social_media_config.get('max_posts_per_ticker', 100)
+                    days_before = strategy_spec.social_window.days_before_event
+                    days_after = strategy_spec.social_window.days_after_event
+                    max_results = strategy_spec.social_window.max_posts_per_ticker
 
                     social_cache_dir = Path('data/social_media')
                     social_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -634,46 +643,12 @@ def main():
 
                     # Extract reaction features (handle missing Reddit data gracefully)
                     if posts_df.empty:
-                        logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}, using neutral sentiment")
-                        # ADVANCED FALLBACK: Hybrid FinBERT + Keyword Sentiment
-                        # 1. Try FinBERT on relevant text
-                        # 2. If FinBERT is Neutral (0.0) but Keywords are Strong, use Keywords
-                        # This handles "boring legalese" that actually contains a negative event
-                        
-                        fallback_intensity = 0.0
-                        finbert_used = False
-                        
-                        if sentiment_analyzer:
-                            relevant_text = filing_parser.extract_esg_relevant_sections(text)
-                            filing_text_snippet = relevant_text[:1000] 
-                            sentiment_result = sentiment_analyzer.analyze_single(filing_text_snippet)
-                            finbert_score = sentiment_analyzer.score_to_numeric(sentiment_result)
-                            
-                            if abs(finbert_score) > 0.01:
-                                fallback_intensity = finbert_score
-                                finbert_used = True
-                                logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}, using FinBERT on filing text: {finbert_score:.3f}")
-                        
-                        # If FinBERT was neutral or unavailable, check event keywords
-                        if not finbert_used or abs(fallback_intensity) < 0.01:
-                            event_sentiment = event_result.get('sentiment', 'neutral')
-                            if event_sentiment == 'positive':
-                                fallback_intensity = 0.5
-                                logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}, FinBERT neutral, using event sentiment: {event_sentiment} ({fallback_intensity})")
-                            elif event_sentiment == 'negative':
-                                fallback_intensity = -0.5
-                                logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}, FinBERT neutral, using event sentiment: {event_sentiment} ({fallback_intensity})")
-                            elif finbert_used:
-                                logger.warning(f"  ⚠ No {source_name} posts found for {filing['ticker']}, FinBERT and Event both neutral")
-                        
-                        reaction_features = {
-                            'intensity': fallback_intensity,
-                            'volume_ratio': 1.0,  # Baseline volume
-                            'duration_days': 0,  # No reaction duration
-                            'n_tweets': 0,  # No posts
-                            'max_sentiment': fallback_intensity,  # Use hybrid score
-                            'polarization': 0.0  # No disagreement
-                        }
+                        logger.warning(
+                            "  ⚠ No %s posts found for %s; using neutral non-tradable reaction features",
+                            source_name,
+                            filing['ticker'],
+                        )
+                        reaction_features = feature_extractor._get_default_features()
                     else:
                         # Extract features from available social media data
                         reaction_features = feature_extractor.extract_features(posts_df, event_date)
@@ -699,6 +674,7 @@ def main():
                 logger.error(f"  Error processing filing: {e}")
                 continue
 
+        events_data = date_validator.validate_events(events_data)
         logger.info(f"\nDetected {len(events_data)} ESG events with {source_name} reactions")
 
         # Save to cache if requested
@@ -719,21 +695,32 @@ def main():
     logger.info("\n>>> STEP 6: SIGNAL GENERATION")
 
     # Load quality filter thresholds from config (ROOT CAUSE FIX Dec 2025)
-    quality_filters = config.get('signals', {}).get('quality_filters', {})
-    min_intensity = quality_filters.get('min_intensity', 0.05)
-    min_volume_ratio = quality_filters.get('min_volume_ratio', 1.0)
-    min_posts = quality_filters.get('min_posts', 5)  # NEW: Minimum posts required
-    require_social_data = quality_filters.get('require_social_data', True)  # NEW: Require social validation
-    min_confidence = quality_filters.get('min_confidence', 0.0)  # Confidence floor (for permissive mode)
+    min_intensity = strategy_spec.signal.min_intensity
+    min_volume_ratio = strategy_spec.signal.min_volume_ratio
+    min_posts = strategy_spec.signal.min_posts
+    require_social_data = strategy_spec.signal.require_social_data
+    min_confidence = strategy_spec.signal.min_confidence
 
-    logger.info(f"Quality Filters (ROOT CAUSE FIX - Dec 2025):")
+    logger.info("Quality Filters (canonical strategy spec):")
     logger.info(f"  Min intensity: {min_intensity}")
     logger.info(f"  Min volume ratio: {min_volume_ratio}x")
-    logger.info(f"  Min posts: {min_posts} (excludes events with sparse social data)")
-    logger.info(f"  Require social data: {require_social_data} (excludes events without Reddit coverage)")
-    logger.info(f"  Min confidence: {min_confidence} (filters low-quality signals)")
+    logger.info(f"  Min posts: {min_posts}")
+    logger.info(f"  Require social data: {require_social_data}")
+    logger.info(f"  Min confidence: {min_confidence}")
+    logger.info(
+        "  Weight method: %s | Lookback: %s | Weights: %s",
+        strategy_spec.signal.weight_derivation_method,
+        strategy_spec.signal.lookback_window,
+        strategy_spec.signal.weights,
+    )
 
-    signal_generator = ESGSignalGenerator()
+    signal_generator = ESGSignalGenerator(
+        lookback_window=strategy_spec.signal.lookback_window,
+        weights=strategy_spec.signal.weights,
+        weight_method=WeightDerivationMethod.from_string(
+            strategy_spec.signal.weight_derivation_method
+        ),
+    )
 
     # ROOT CAUSE FIX: Pass new quality parameters to signal generation
     # This filters out noise signals from events without social media validation
@@ -745,6 +732,7 @@ def main():
         min_intensity=min_intensity,
         min_confidence=min_confidence,
     )
+    signals_df = date_validator.validate_signals(signals_df)
 
     if signals_df.empty:
         logger.warning("No trading signals generated after quality filtering.")
@@ -766,20 +754,28 @@ def main():
     logger.info("\n>>> STEP 7: PORTFOLIO CONSTRUCTION")
 
     portfolio_constructor = PortfolioConstructor(
-        strategy_type=config['portfolio']['strategy_type']
+        strategy_type=strategy_spec.portfolio.strategy_type,
+        selection_balance=strategy_spec.portfolio.selection_balance,
+        exposure_model=strategy_spec.portfolio.exposure_model,
+        gross_exposure_target=strategy_spec.portfolio.gross_exposure_target,
     )
 
     # Rolling window: accumulate non-expired signals at each rebalance date
     # window_days = holding_period ensures signal lifetime matches position lifetime
-    window_days = config['portfolio'].get('holding_period', 0)
-    rebalance_freq = config['portfolio'].get('rebalance_frequency', 'W')
+    window_days = strategy_spec.portfolio.holding_period
+    rebalance_freq = strategy_spec.portfolio.rebalance_frequency
 
     portfolio = portfolio_constructor.construct_portfolio(
         signals_df,
-        method=config['portfolio']['method'],
-        balance_long_short=config.get('signals', {}).get('quality_filters', {}).get('balance_long_short', False),
+        method=strategy_spec.portfolio.method,
+        selection_balance=strategy_spec.portfolio.selection_balance,
+        exposure_model=strategy_spec.portfolio.exposure_model,
         window_days=window_days,
         rebalance_freq=rebalance_freq,
+    )
+    portfolio = portfolio_constructor.apply_position_limits(
+        portfolio,
+        max_position=strategy_spec.portfolio.max_position,
     )
 
     stats = portfolio_constructor.get_portfolio_statistics(portfolio)
@@ -796,63 +792,65 @@ def main():
         portfolio.to_csv(portfolio_file, index=False)
         logger.info(f"Saved portfolio to {portfolio_file}")
 
-    # Step 8: Backtesting
-    logger.info("\n>>> STEP 8: BACKTESTING")
-    
     # Run backtest
     logger.info("\n>>> STEP 8: BACKTESTING")
 
-    # Cash equitization: download SPY returns so idle cash earns market return
-    # Standard institutional practice for event-driven strategies (Pedersen 2015).
-    # Without this, sparse event-driven strategies suffer "cash drag" — idle capital
-    # earns 0% while the market appreciates. Institutional funds (Citadel, AQR, DE Shaw)
-    # equitize cash by investing idle capital in a broad market index.
     cash_benchmark_returns = None
-    try:
-        import yfinance as yf
-        # Use price data's actual date range (includes lookback buffer before start_date)
-        if isinstance(prices.index, pd.MultiIndex):
-            price_dates = prices.index.get_level_values(0)
-        else:
-            price_dates = prices.index
-        price_start = price_dates.min()
-        price_end = price_dates.max()
+    if strategy_spec.risk.cash_overlay_enabled:
+        try:
+            import yfinance as yf
+            if isinstance(prices.index, pd.MultiIndex):
+                price_dates = prices.index.get_level_values(0)
+            else:
+                price_dates = prices.index
+            price_start = price_dates.min()
+            price_end = price_dates.max()
 
-        spy_data = yf.download('SPY', start=price_start - pd.Timedelta(days=5),
-                               end=price_end + pd.Timedelta(days=5),
-                               progress=False, auto_adjust=True)
-        if isinstance(spy_data.columns, pd.MultiIndex):
-            spy_data.columns = spy_data.columns.get_level_values(0)
-        spy_returns = spy_data['Close'].pct_change().dropna()
-        cash_benchmark_returns = spy_returns
-        logger.info(f"Cash equitization enabled: SPY ({len(spy_returns)} daily returns)")
-        logger.info(f"  SPY period: {spy_returns.index[0].date()} to {spy_returns.index[-1].date()}")
-        logger.info(f"  SPY total return: {(spy_data['Close'].iloc[-1]/spy_data['Close'].iloc[0]-1)*100:.2f}%")
-    except Exception as e:
-        logger.warning(f"Could not download SPY for cash equitization: {e}")
-        logger.warning("Cash will earn 0% (no equitization)")
+            spy_data = yf.download(
+                'SPY',
+                start=price_start - pd.Timedelta(days=5),
+                end=price_end + pd.Timedelta(days=5),
+                progress=False,
+                auto_adjust=True,
+            )
+            if isinstance(spy_data.columns, pd.MultiIndex):
+                spy_data.columns = spy_data.columns.get_level_values(0)
+            spy_returns = spy_data['Close'].pct_change().dropna()
+            cash_benchmark_returns = spy_returns
+            logger.info(f"Cash overlay enabled: SPY ({len(spy_returns)} daily returns)")
+            logger.info(
+                "  SPY period: %s to %s",
+                spy_returns.index[0].date(),
+                spy_returns.index[-1].date(),
+            )
+        except Exception as e:
+            logger.warning(f"Could not download SPY for cash overlay: {e}")
+            logger.warning("Cash overlay disabled for this run")
+    else:
+        logger.info("Cash overlay disabled in canonical baseline config")
 
-    risk_config = config.get('risk_management', {})
-    equitization_config = risk_config.get('cash_equitization', {})
     backtest_engine = BacktestEngine(
         prices=prices,
         initial_capital=config['backtest']['initial_capital'],
         commission_pct=config['backtest']['commission_pct'],
         slippage_bps=config['backtest']['slippage_bps'],
-        max_position_size=risk_config.get('max_position_size', 0.10),
-        target_volatility=risk_config.get('target_volatility', 0.12),
-        max_drawdown_threshold=risk_config.get('max_drawdown_threshold', 0.15),
-        balance_long_short=config.get('signals', {}).get('quality_filters', {}).get('balance_long_short', False),
+        enable_risk_management=strategy_spec.risk.enabled,
+        max_position_size=strategy_spec.risk.max_position_size,
+        target_volatility=strategy_spec.risk.target_volatility,
+        max_drawdown_threshold=strategy_spec.risk.max_drawdown_threshold,
+        adaptive_drawdown_thresholds=strategy_spec.risk.adaptive_thresholds,
+        leverage_limit=strategy_spec.risk.leverage_limit,
+        balance_long_short=(strategy_spec.portfolio.exposure_model == 'dollar_neutral'),
         cash_benchmark_returns=cash_benchmark_returns,
-        regime_aware_equitization=equitization_config.get('regime_aware', False),
-        bear_equitization_pct=equitization_config.get('bear_equitization_pct', 0.40),
-        sma_lookback=equitization_config.get('sma_lookback', 100),
+        regime_aware_equitization=strategy_spec.risk.regime_aware_equitization,
+        bear_equitization_pct=strategy_spec.risk.bear_equitization_pct,
+        sma_lookback=strategy_spec.risk.sma_lookback,
     )
 
     results = backtest_engine.run(
         signals=portfolio,
-        rebalance_freq=config['portfolio']['rebalance_frequency'],
-        holding_period=config['portfolio']['holding_period']
+        rebalance_freq=strategy_spec.portfolio.rebalance_frequency,
+        holding_period=strategy_spec.portfolio.holding_period,
     )
 
     logger.info(f"Backtest complete!")
@@ -917,6 +915,7 @@ def main():
     logger.info(f"Portfolio positions: {stats['n_positions']}")
     logger.info(f"Final return: {results.get_total_return()*100:.2f}%")
     logger.info("="*60)
+    date_validator.print_summary()
 
 
 if __name__ == '__main__':

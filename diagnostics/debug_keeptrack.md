@@ -1,5 +1,7 @@
 # Debug & Bug Fix History
 
+> Historical artifact: this debugging log predates the January 2026 strategy realignment. It remains useful for provenance, but the canonical runtime contract is now `run_production.py` plus `config/config.yaml`.
+
 Complete documentation of all bugs identified, fixed, and validated for the ESG Event-Driven Alpha Strategy.
 
 **Status**: ✅ ALL CRITICAL BUGS FIXED

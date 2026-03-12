@@ -69,8 +69,8 @@ class TwitterFetcher:
 
     def fetch_tweets_for_event(self, ticker: str, event_date: datetime,
                                  keywords: Optional[List[str]] = None,
-                                 days_before: int = 3,
-                                 days_after: int = 7,
+                                 days_before: int = 10,
+                                 days_after: int = 3,
                                  max_results: int = 100) -> pd.DataFrame:
         """
         Fetch tweets related to a ticker around an event date
@@ -141,8 +141,8 @@ class TwitterFetcher:
 
     def fetch_tweets_batch(self, tickers: List[str], event_dates: Dict[str, datetime],
                             keywords: Optional[List[str]] = None,
-                            days_before: int = 3,
-                            days_after: int = 7,
+                            days_before: int = 10,
+                            days_after: int = 3,
                             max_results_per_ticker: int = 100) -> Dict[str, pd.DataFrame]:
         """
         Fetch tweets for multiple tickers/events
@@ -209,7 +209,7 @@ class TwitterFetcher:
         return query
 
     def _generate_mock_tweets(self, ticker: str, event_date: datetime,
-                               days_before: int = 3, days_after: int = 7,
+                               days_before: int = 10, days_after: int = 3,
                                n_tweets: int = 100) -> pd.DataFrame:
         """
         Generate realistic mock Twitter data for testing

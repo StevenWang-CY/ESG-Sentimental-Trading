@@ -594,6 +594,15 @@ def create_backtest_function(
     initial_capital: float = 1_000_000,
     commission_pct: float = 0.0005,
     slippage_bps: float = 3.0,
+    rebalance_freq: str = 'W',
+    holding_period: int = 49,
+    enable_risk_management: bool = False,
+    max_position_size: float = 0.10,
+    target_volatility: float = 0.18,
+    max_drawdown_threshold: float = 0.15,
+    adaptive_drawdown_thresholds: bool = True,
+    leverage_limit: float = 1.0,
+    balance_long_short: bool = True,
 ) -> Callable:
     """
     Create a backtest function compatible with walk-forward validation.
@@ -636,10 +645,20 @@ def create_backtest_function(
                 initial_capital=initial_capital,
                 commission_pct=commission_pct,
                 slippage_bps=slippage_bps,
-                enable_risk_management=False,  # Use raw signals for validation
+                enable_risk_management=enable_risk_management,
+                max_position_size=max_position_size,
+                target_volatility=target_volatility,
+                max_drawdown_threshold=max_drawdown_threshold,
+                adaptive_drawdown_thresholds=adaptive_drawdown_thresholds,
+                leverage_limit=leverage_limit,
+                balance_long_short=balance_long_short,
             )
 
-            result = engine.run(signals, rebalance_freq='W', holding_period=10)
+            result = engine.run(
+                signals,
+                rebalance_freq=rebalance_freq,
+                holding_period=holding_period,
+            )
 
             # Calculate metrics
             returns = result.get_daily_returns()
