@@ -276,8 +276,8 @@ class TestAggregateMetrics:
     """Tests for aggregate metrics calculation."""
 
     def test_passes_minimum_criteria(self):
-        """Test minimum criteria check."""
-        # Passing case
+        """Test minimum criteria check (DSR-aware after refinement)."""
+        # Passing case — high DSR (strong out-of-sample evidence)
         passing = AggregateMetrics(
             mean_train_sharpe=1.0,
             mean_test_sharpe=0.5,
@@ -288,6 +288,8 @@ class TestAggregateMetrics:
             best_oos_sharpe=1.0,
             n_folds=5,
             total_oos_trades=100,
+            deflated_sharpe=0.95,
+            probabilistic_sharpe=0.98,
         )
         assert passing.passes_minimum_criteria is True
 
@@ -302,6 +304,8 @@ class TestAggregateMetrics:
             best_oos_sharpe=0.5,
             n_folds=5,
             total_oos_trades=100,
+            deflated_sharpe=0.40,
+            probabilistic_sharpe=0.45,
         )
         assert failing_sharpe.passes_minimum_criteria is False
 
@@ -316,8 +320,26 @@ class TestAggregateMetrics:
             best_oos_sharpe=0.5,
             n_folds=5,
             total_oos_trades=100,
+            deflated_sharpe=0.95,
+            probabilistic_sharpe=0.95,
         )
         assert failing_overfit.passes_minimum_criteria is False
+
+        # Failing case - low DSR even though other criteria pass
+        failing_dsr = AggregateMetrics(
+            mean_train_sharpe=1.0,
+            mean_test_sharpe=0.5,
+            std_test_sharpe=0.3,
+            mean_overfit_ratio=0.5,
+            pct_profitable_oos=0.6,
+            worst_oos_sharpe=-0.1,
+            best_oos_sharpe=1.0,
+            n_folds=5,
+            total_oos_trades=100,
+            deflated_sharpe=0.60,  # Below 0.90 (selection bias not ruled out)
+            probabilistic_sharpe=0.70,
+        )
+        assert failing_dsr.passes_minimum_criteria is False
 
 
 class TestWeightOptimizer:

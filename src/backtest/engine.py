@@ -1,6 +1,16 @@
 """
 Backtesting Engine
-Simulates strategy performance on historical data with comprehensive risk management
+Simulates strategy performance on historical data with comprehensive risk management.
+
+Academic references for transaction cost modeling:
+- Almgren, R., Thum, C., Hauptmann, E., & Li, H. (2005) "Direct Estimation of
+  Equity Market Impact", Risk. Square-root market impact law for equities:
+  impact_bps = η * σ * sqrt(Q / V), where Q is trade size, V is daily volume.
+- Almgren, R. & Chriss, N. (2000) "Optimal Execution of Portfolio Transactions",
+  Journal of Risk. Temporary + permanent market impact decomposition.
+- D'Avolio, G. (2002) "The market for borrowing stock", JFE. Short borrow
+  cost averages 1-2% annualized for easy-to-borrow names, higher for specials.
+- Engelberg, Reed & Ringgenberg (2018) "Short-selling risk", JF.
 """
 
 import pandas as pd
@@ -38,7 +48,14 @@ class BacktestEngine:
                  cash_benchmark_returns: Optional[pd.Series] = None,
                  regime_aware_equitization: bool = False,
                  bear_equitization_pct: float = 0.40,
-                 sma_lookback: int = 100):
+                 sma_lookback: int = 100,
+                 use_market_impact_model: bool = True,
+                 impact_coefficient: float = 0.10,
+                 default_adv_pct: float = 0.01,
+                 volume_data: Optional[pd.DataFrame] = None,
+                 annual_borrow_cost: float = 0.0040,
+                 annual_margin_rate: float = 0.0,
+                 borrow_cost_by_ticker: Optional[Dict[str, float]] = None):
         """
         Initialize backtest engine with risk management
 
@@ -60,6 +77,27 @@ class BacktestEngine:
                 (0.40 = 40% of SPY return). Only used if regime_aware_equitization=True.
             sma_lookback: SMA lookback period for regime detection (trading days).
                 100-day recommended (Zakamulin 2014). Default: 100.
+            use_market_impact_model: Enable Almgren-Chriss square-root market
+                impact on top of static slippage (default True). When False,
+                only the constant slippage_bps is applied.
+            impact_coefficient: Almgren-Chriss η coefficient in
+                impact = η * σ * sqrt(Q/V). Empirical US equity range 0.05-0.15
+                (Almgren et al. 2005 Table 3). Default 0.10.
+            default_adv_pct: If no volume data is supplied, assume the trade
+                represents this fraction of daily volume (default 1%). Used to
+                impute sqrt(Q/V) ≈ sqrt(default_adv_pct).
+            volume_data: Optional DataFrame of daily volume data (same index
+                shape as `prices`). When provided, participation rate is
+                computed exactly from trade size / 20-day average volume.
+            annual_borrow_cost: Annualized stock-borrow fee charged daily on
+                the absolute market value of short positions (D'Avolio 2002
+                median ≈ 0.40% for easy-to-borrow). Default 40 bps/year.
+            annual_margin_rate: Annualized financing rate on long gross
+                exposure above cash (for leveraged books). Default 0% since
+                base case is dollar-neutral with net cash ≈ initial capital.
+            borrow_cost_by_ticker: Optional per-ticker overrides for hard-to-
+                borrow names (e.g., {'GME': 0.50}). Falls back to
+                annual_borrow_cost when missing.
         """
         self.prices = prices
         self.initial_capital = initial_capital
@@ -72,6 +110,14 @@ class BacktestEngine:
         self.bear_equitization_pct = bear_equitization_pct
         self.sma_lookback = sma_lookback
         self.adaptive_drawdown_thresholds = adaptive_drawdown_thresholds
+        self.use_market_impact_model = use_market_impact_model
+        self.impact_coefficient = impact_coefficient
+        self.default_adv_pct = default_adv_pct
+        self.volume_data = volume_data
+        self.annual_borrow_cost = annual_borrow_cost
+        self.annual_margin_rate = annual_margin_rate
+        self.borrow_cost_by_ticker = borrow_cost_by_ticker or {}
+        self._trading_days_per_year = 252
 
         self.portfolio_value = []
         self.positions = []
@@ -131,6 +177,114 @@ class BacktestEngine:
         current_price = price_index.iloc[-1]
 
         return current_price >= sma
+
+    def _estimate_realized_volatility(self, date: datetime, ticker: str,
+                                      lookback: int = 20) -> float:
+        """
+        Estimate ticker-level daily realized volatility from the past
+        `lookback` trading days (excluding the current date). Falls back to
+        a 2% daily vol prior when history is insufficient.
+
+        Used as σ in the Almgren-Chriss impact formula:
+            impact_bps = 10000 * η * σ_daily * sqrt(participation_rate)
+        """
+        try:
+            if not isinstance(self.prices.index, pd.MultiIndex):
+                return 0.02  # Fallback: 2% daily vol
+
+            if isinstance(self.prices.columns, pd.MultiIndex):
+                mask = self.prices.index.get_level_values('ticker') == ticker
+                ticker_prices = self.prices[mask]
+                if ('Close', ticker) in self.prices.columns:
+                    px = ticker_prices[('Close', ticker)]
+                else:
+                    return 0.02
+            else:
+                try:
+                    ticker_prices = self.prices.xs(ticker, level='ticker')
+                    px = ticker_prices['Close']
+                except (KeyError, ValueError):
+                    return 0.02
+
+            # Restrict to history strictly before the trade date (anti look-ahead)
+            px = px.sort_index()
+            past_dates = [d for d in px.index.get_level_values(0) if d < date] if isinstance(px.index, pd.MultiIndex) else [d for d in px.index if d < date]
+            if not past_dates:
+                return 0.02
+            recent = px.loc[past_dates[-lookback:]] if len(past_dates) >= 2 else px
+            if len(recent) < 5:
+                return 0.02
+            rets = np.log(recent.astype(float)).diff().dropna()
+            vol = rets.std()
+            if pd.isna(vol) or vol <= 0:
+                return 0.02
+            return float(vol)
+        except Exception:
+            return 0.02
+
+    def _compute_slippage_rate(self, date: datetime, ticker: str,
+                               trade_value: float) -> float:
+        """
+        Compute total slippage rate (round-trip one-way) for a single trade.
+
+        Total = static_slippage + market_impact
+
+        Market impact (Almgren et al. 2005):
+            impact_rate = η * σ_daily * sqrt(participation_rate)
+        where participation_rate = |trade_notional| / (ADV * avg_price)
+        approximated by `default_adv_pct` when volume data is unavailable.
+        """
+        base = self.slippage_bps  # fractional (e.g., 0.0003 for 3 bps)
+        if not self.use_market_impact_model:
+            return base
+
+        sigma = self._estimate_realized_volatility(date, ticker)
+
+        # Participation rate: fall back to the prior when volume data is absent
+        participation = self.default_adv_pct
+        if self.volume_data is not None and isinstance(self.volume_data, pd.DataFrame):
+            try:
+                if (date, ticker) in self.volume_data.index:
+                    adv = float(self.volume_data.loc[(date, ticker)])
+                    px = self._get_price(date, ticker) or 1.0
+                    dollar_adv = adv * px
+                    if dollar_adv > 0:
+                        participation = abs(trade_value) / dollar_adv
+            except Exception:
+                participation = self.default_adv_pct
+
+        # Cap participation rate at 100% to avoid unrealistic impact
+        participation = min(max(participation, 1e-6), 1.0)
+        impact_rate = self.impact_coefficient * sigma * np.sqrt(participation)
+
+        # Cap total slippage at 200 bps per trade (safety rail)
+        total = base + impact_rate
+        return float(np.clip(total, 0.0, 0.02))
+
+    def _accrue_short_borrow_cost(self, date: datetime, positions: Dict,
+                                  cash: float) -> float:
+        """
+        Accrue one day of stock-borrow fees on the absolute market value of
+        short positions. D'Avolio (2002) documents a median 0.40%/year borrow
+        for easy-to-borrow names with a long tail of specials.
+        """
+        if not positions or self.annual_borrow_cost <= 0:
+            return cash
+
+        daily_rate_default = self.annual_borrow_cost / self._trading_days_per_year
+        short_cost = 0.0
+        for ticker, position in positions.items():
+            if position['shares'] >= 0:
+                continue
+            price = self._get_price(date, ticker)
+            if not price or price <= 0:
+                continue
+            market_value = abs(position['shares']) * price
+            rate_annual = self.borrow_cost_by_ticker.get(ticker, self.annual_borrow_cost)
+            daily_rate = rate_annual / self._trading_days_per_year
+            short_cost += market_value * daily_rate
+
+        return cash - short_cost
 
     def run(self, signals: pd.DataFrame, rebalance_freq: str = 'W',
             holding_period: int = 10) -> 'BacktestResult':
@@ -211,6 +365,11 @@ class BacktestEngine:
                     cash *= (1 + benchmark_ret * self.bear_equitization_pct)
                 else:
                     cash *= (1 + benchmark_ret)
+
+            # Daily short-borrow fee accrual (D'Avolio 2002).
+            # Charge before rebalancing so liquidations use post-fee cash.
+            if i > 0 and current_positions:
+                cash = self._accrue_short_borrow_cost(date, current_positions, cash)
 
             # Calculate current portfolio value BEFORE rebalancing
             portfolio_value_before = self._calculate_portfolio_value_correct(
@@ -335,8 +494,11 @@ class BacktestEngine:
                     proceeds = position['shares'] * price
                     # For longs: get cash back; For shorts: pay cash to cover
                     cash += proceeds
-                    # Apply transaction costs
-                    cash -= abs(proceeds) * (self.commission_pct + self.slippage_bps)
+                    # Apply transaction costs with dynamic slippage
+                    slippage_rate = self._compute_slippage_rate(
+                        date, ticker, abs(proceeds)
+                    )
+                    cash -= abs(proceeds) * (self.commission_pct + slippage_rate)
                     print(f"DEBUG:   Liquidated {ticker} after {days_held} days (holding period: {holding_period})")
             else:
                 # Keep position (still within holding period)
@@ -430,23 +592,28 @@ class BacktestEngine:
 
             print(f"DEBUG:     Target value: ${target_value:,.2f}")
 
+            # Dynamic slippage: static + Almgren-Chriss square-root impact
+            slippage_rate = self._compute_slippage_rate(
+                date, ticker, abs(target_value)
+            )
+
             # Calculate shares (accounting for transaction costs)
             if target_value > 0:
                 # Long position - FIX Issue #8: Use round() instead of int() truncation
-                shares = round(target_value / (price * (1 + self.commission_pct + self.slippage_bps)))
+                shares = round(target_value / (price * (1 + self.commission_pct + slippage_rate)))
                 if shares == 0 and target_value > price * 0.5:
                     shares = 1  # Minimum 1 share if target covers at least half a share
-                cost = shares * price * (1 + self.commission_pct + self.slippage_bps)
+                cost = shares * price * (1 + self.commission_pct + slippage_rate)
                 cash -= cost
-                print(f"DEBUG:     LONG: {shares} shares @ ${price:.2f} = ${cost:,.2f}")
+                print(f"DEBUG:     LONG: {shares} shares @ ${price:.2f} = ${cost:,.2f} (slippage={slippage_rate*10000:.1f}bps)")
             else:
                 # Short position (negative shares) - also use round() for consistency
-                shares = round(target_value / (price * (1 - self.commission_pct - self.slippage_bps)))
+                shares = round(target_value / (price * (1 - self.commission_pct - slippage_rate)))
                 if shares == 0 and target_value < -price * 0.5:
                     shares = -1  # Minimum 1 share short if target covers at least half a share
-                proceeds = abs(shares) * price * (1 - self.commission_pct - self.slippage_bps)
+                proceeds = abs(shares) * price * (1 - self.commission_pct - slippage_rate)
                 cash += proceeds
-                print(f"DEBUG:     SHORT: {shares} shares @ ${price:.2f} = ${proceeds:,.2f}")
+                print(f"DEBUG:     SHORT: {shares} shares @ ${price:.2f} = ${proceeds:,.2f} (slippage={slippage_rate*10000:.1f}bps)")
 
             if shares != 0:
                 new_positions[ticker] = {

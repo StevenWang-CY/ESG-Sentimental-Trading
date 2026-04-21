@@ -1,11 +1,22 @@
 """
 Performance Metrics
 Calculates portfolio performance metrics
+
+Academic references:
+- Lo, A. (2002) "The Statistics of Sharpe Ratios", Financial Analysts Journal.
+  Provides autocorrelation-adjusted annualization factor η(q) that corrects
+  the naive sqrt(q) scaling when daily returns exhibit serial dependence.
+- Bailey, D.H. & Lopez de Prado, M. (2014) "The Deflated Sharpe Ratio",
+  Journal of Portfolio Management. Corrects for multiple testing selection bias
+  and non-normal return distributions (skewness, kurtosis).
+- Bailey, D.H. & Lopez de Prado, M. (2012) "The Sharpe Ratio Efficient Frontier",
+  Journal of Risk. Probabilistic Sharpe Ratio (PSR).
 """
 
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional
+from scipy import stats
 
 
 class PerformanceAnalyzer:
@@ -55,12 +66,20 @@ class PerformanceAnalyzer:
         annualized_return = cagr
         annualized_vol = self.returns.std() * np.sqrt(periods_per_year)
 
+        sharpe_naive = self._calculate_sharpe_ratio()
+        sharpe_lo = self._calculate_sharpe_ratio_lo_adjusted()
+        psr = self._calculate_probabilistic_sharpe(sr_benchmark=0.0)
+        dsr = self._calculate_deflated_sharpe(n_trials=1)
+
         return {
             'total_return': total_return,
             'cagr': cagr,
             'annualized_return': annualized_return,
             'annualized_volatility': annualized_vol,
-            'sharpe_ratio': self._calculate_sharpe_ratio(),
+            'sharpe_ratio': sharpe_naive,
+            'sharpe_ratio_lo_adjusted': sharpe_lo,
+            'probabilistic_sharpe': psr,
+            'deflated_sharpe': dsr,
             'sortino_ratio': self._calculate_sortino_ratio(),
             'calmar_ratio': self._calculate_calmar_ratio()
         }
@@ -126,10 +145,15 @@ class PerformanceAnalyzer:
 
     def _calculate_sharpe_ratio(self, risk_free_rate: float = 0.02) -> float:
         """
-        Calculate Sharpe Ratio
+        Calculate Sharpe Ratio (naive sqrt(q) annualization — assumes IID returns)
 
         Formula: Sharpe = sqrt(252) * E[R - Rf] / std(R - Rf)
         where R is portfolio return and Rf is risk-free rate
+
+        WARNING: This assumes daily returns are IID. When returns are
+        autocorrelated (as is typical for event-driven strategies with
+        overlapping holding periods), prefer the Lo (2002)-adjusted
+        Sharpe ratio.
         """
         if self.returns.empty:
             return 0.0
@@ -141,6 +165,173 @@ class PerformanceAnalyzer:
 
         sharpe = np.sqrt(252) * excess_returns.mean() / excess_returns.std()
         return sharpe
+
+    def _calculate_sharpe_ratio_lo_adjusted(
+        self,
+        risk_free_rate: float = 0.02,
+        q: int = 252,
+        max_lag: int = 20,
+    ) -> float:
+        """
+        Calculate autocorrelation-adjusted Sharpe Ratio (Lo 2002).
+
+        Naive sqrt(q) annualization overstates SR when returns exhibit
+        positive autocorrelation. Lo (2002) provides a scaling factor:
+
+            eta(q) = q / sqrt( q + 2 * sum_{k=1}^{q-1} (q - k) * rho_k )
+
+        where rho_k is the k-th autocorrelation coefficient.
+
+        Adjusted annualized SR = eta(q) * (E[R - Rf] / std(R - Rf))
+
+        In practice, we truncate the sum at max_lag (default 20) since
+        higher-order autocorrelations are typically negligible.
+
+        Reference: Lo, A. (2002) "The Statistics of Sharpe Ratios",
+        Financial Analysts Journal, 58(4), 36-52.
+        """
+        if self.returns.empty or len(self.returns) < max_lag + 2:
+            return 0.0
+
+        excess_returns = self.returns - (risk_free_rate / 252)
+        daily_std = excess_returns.std()
+        if daily_std == 0:
+            return 0.0
+
+        daily_sr = excess_returns.mean() / daily_std
+
+        # Compute autocorrelations up to max_lag (truncation)
+        effective_lag = min(max_lag, len(excess_returns) - 2)
+        rho_sum = 0.0
+        for k in range(1, effective_lag + 1):
+            rho_k = excess_returns.autocorr(lag=k)
+            if pd.isna(rho_k):
+                rho_k = 0.0
+            # Lo (2002) approximation: weight = (q - k) ≈ q(1 - k/q)
+            rho_sum += (q - k) * rho_k
+
+        denominator = q + 2.0 * rho_sum
+        if denominator <= 0:
+            # Autocorrelation structure prevents adjustment;
+            # fall back to naive annualization.
+            return np.sqrt(q) * daily_sr
+
+        eta_q = q / np.sqrt(denominator)
+        return eta_q * daily_sr
+
+    def _calculate_probabilistic_sharpe(
+        self,
+        sr_benchmark: float = 0.0,
+        risk_free_rate: float = 0.02,
+    ) -> float:
+        """
+        Probabilistic Sharpe Ratio (PSR) - Bailey & Lopez de Prado (2012).
+
+        PSR = Pr(SR_true > SR_benchmark | observed SR)
+
+        Accounts for non-normality (skewness and kurtosis) of returns.
+        PSR > 0.95 is typically required to reject the null that the
+        strategy's true Sharpe is <= benchmark at the 5% significance level.
+
+        Formula:
+            PSR = Φ( (SR_hat - SR_b) * sqrt(n-1) /
+                    sqrt(1 - γ3·SR_hat + ((γ4-1)/4)·SR_hat²) )
+
+        where Φ is the standard normal CDF, γ3 is skew, γ4 is kurtosis
+        (non-excess), and SR_hat is the observed (non-annualized) Sharpe.
+
+        Reference: Bailey, D.H. & Lopez de Prado, M. (2012)
+        "The Sharpe Ratio Efficient Frontier", Journal of Risk, 15(2).
+        """
+        if self.returns.empty or len(self.returns) < 30:
+            return 0.0
+
+        excess_returns = self.returns - (risk_free_rate / 252)
+        n = len(excess_returns)
+        std = excess_returns.std()
+        if std == 0:
+            return 0.0
+
+        sr_hat = excess_returns.mean() / std  # Non-annualized (daily)
+
+        # Convert benchmark to daily scale to match sr_hat
+        sr_b_daily = sr_benchmark / np.sqrt(252)
+
+        skew = stats.skew(excess_returns.dropna(), bias=False)
+        kurt = stats.kurtosis(excess_returns.dropna(), fisher=False, bias=False)  # Non-excess
+
+        # Denominator must be positive
+        denom_sq = 1.0 - skew * sr_hat + ((kurt - 1.0) / 4.0) * (sr_hat ** 2)
+        if denom_sq <= 0:
+            return 0.0
+
+        z = (sr_hat - sr_b_daily) * np.sqrt(n - 1) / np.sqrt(denom_sq)
+        return float(stats.norm.cdf(z))
+
+    def _calculate_deflated_sharpe(
+        self,
+        n_trials: int = 1,
+        risk_free_rate: float = 0.02,
+    ) -> float:
+        """
+        Deflated Sharpe Ratio (DSR) - Bailey & Lopez de Prado (2014).
+
+        DSR corrects PSR for multiple-testing selection bias. When a
+        strategy is chosen from N candidate backtests, the observed SR
+        is upwardly biased (selection-biased maximum of N variates).
+
+        The deflated benchmark SR is:
+            SR_b = sqrt(V) * ((1 - γ)·Φ⁻¹(1 - 1/N) + γ·Φ⁻¹(1 - 1/(N·e)))
+
+        where V is the variance of SRs across trials (here approximated
+        as 1/(n-1) for a single-trial case) and γ is the Euler-Mascheroni
+        constant (≈0.5772). DSR = PSR(SR_b).
+
+        For n_trials=1, DSR ≡ PSR(0) (no selection bias correction).
+
+        Reference: Bailey, D.H. & Lopez de Prado, M. (2014)
+        "The Deflated Sharpe Ratio", Journal of Portfolio Management, 40(5).
+        """
+        if self.returns.empty or len(self.returns) < 30:
+            return 0.0
+
+        if n_trials <= 1:
+            return self._calculate_probabilistic_sharpe(
+                sr_benchmark=0.0,
+                risk_free_rate=risk_free_rate,
+            )
+
+        # Expected max of N SRs under null (no skill): order statistic approximation
+        euler_mascheroni = 0.5772156649
+        max_z = (
+            (1.0 - euler_mascheroni) * stats.norm.ppf(1.0 - 1.0 / n_trials) +
+            euler_mascheroni * stats.norm.ppf(1.0 - 1.0 / (n_trials * np.e))
+        )
+
+        # Approximate variance of SR estimate across trials:
+        # Bailey & Lopez de Prado (2014) eq. 7 — for unknown cross-trial variance,
+        # use sample-based plugin: V ≈ (1/(n-1)) * (1 - γ3·SR + ((γ4-1)/4)·SR²)
+        excess = self.returns - (risk_free_rate / 252)
+        n = len(excess)
+        std = excess.std()
+        if std == 0:
+            return 0.0
+        sr_hat_daily = excess.mean() / std
+        skew = stats.skew(excess.dropna(), bias=False)
+        kurt = stats.kurtosis(excess.dropna(), fisher=False, bias=False)
+        variance_component = 1.0 - skew * sr_hat_daily + ((kurt - 1.0) / 4.0) * (sr_hat_daily ** 2)
+        variance_component = max(variance_component, 1e-6)
+        v_sr = variance_component / (n - 1)
+
+        sr_b_daily = np.sqrt(v_sr) * max_z
+
+        # Convert benchmark to annualized to match PSR input convention
+        sr_b_annual = sr_b_daily * np.sqrt(252)
+
+        return self._calculate_probabilistic_sharpe(
+            sr_benchmark=sr_b_annual,
+            risk_free_rate=risk_free_rate,
+        )
 
     def _calculate_sortino_ratio(self, risk_free_rate: float = 0.02) -> float:
         """
@@ -252,6 +443,9 @@ class PerformanceAnalyzer:
                 'annualized_return': 0.0,
                 'annualized_volatility': 0.0,
                 'sharpe_ratio': 0.0,
+                'sharpe_ratio_lo_adjusted': 0.0,
+                'probabilistic_sharpe': 0.0,
+                'deflated_sharpe': 0.0,
                 'sortino_ratio': 0.0,
                 'calmar_ratio': 0.0
             },
@@ -339,6 +533,28 @@ class PerformanceAnalyzer:
                 f"   - Consider if backtest has look-ahead bias or overfitting"
             )
 
+        # Lo-adjusted vs naive Sharpe: flag large autocorrelation-driven inflation
+        naive_sr = returns.get('sharpe_ratio', 0.0)
+        lo_sr = returns.get('sharpe_ratio_lo_adjusted', 0.0)
+        if naive_sr > 0 and lo_sr > 0:
+            inflation = naive_sr / lo_sr if lo_sr != 0 else float('inf')
+            if inflation > 1.25:
+                warnings.append(
+                    f"⚠ Naive Sharpe ({naive_sr:.2f}) is {inflation:.2f}× the "
+                    f"Lo (2002) autocorrelation-adjusted Sharpe ({lo_sr:.2f}):\n"
+                    f"   - Returns exhibit positive serial correlation\n"
+                    f"   - Use lo_adjusted Sharpe for reporting to mitigate bias"
+                )
+
+        # PSR: require high confidence that SR > 0
+        psr = returns.get('probabilistic_sharpe', 0.0)
+        if 0 < psr < 0.95:
+            warnings.append(
+                f"⚠ Probabilistic Sharpe ({psr:.2%}) < 95%:\n"
+                f"   - Cannot reject SR=0 at 5% significance level\n"
+                f"   - Consider more data or selection-bias adjustments"
+            )
+
         return warnings
 
     def print_tear_sheet(self):
@@ -354,7 +570,7 @@ class PerformanceAnalyzer:
         for key, value in metrics['returns'].items():
             if isinstance(value, float):
                 # Ratios should NOT be formatted as percentages
-                if key in ['sharpe_ratio', 'sortino_ratio', 'calmar_ratio']:
+                if key in ['sharpe_ratio', 'sharpe_ratio_lo_adjusted', 'probabilistic_sharpe', 'deflated_sharpe', 'sortino_ratio', 'calmar_ratio']:
                     print(f"{key:30s}: {value:10.2f}")
                 else:
                     print(f"{key:30s}: {value:10.2%}")
@@ -405,7 +621,7 @@ class PerformanceAnalyzer:
             f.write("-"*60 + "\n")
             for key, value in metrics['returns'].items():
                 if isinstance(value, float):
-                    if key in ['sharpe_ratio', 'sortino_ratio', 'calmar_ratio']:
+                    if key in ['sharpe_ratio', 'sharpe_ratio_lo_adjusted', 'probabilistic_sharpe', 'deflated_sharpe', 'sortino_ratio', 'calmar_ratio']:
                         f.write(f"{key:30s}: {value:10.2f}\n")
                     else:
                         f.write(f"{key:30s}: {value:10.2%}\n")

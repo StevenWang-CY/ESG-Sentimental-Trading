@@ -109,7 +109,13 @@ class ValidationResult:
 
 @dataclass
 class AggregateMetrics:
-    """Aggregate metrics across all validation folds."""
+    """Aggregate metrics across all validation folds.
+
+    Includes deflated Sharpe ratio (Bailey & Lopez de Prado 2014) for
+    multiple-testing-aware inference: when many folds/configurations are
+    evaluated, the naively-best observed Sharpe is an upwardly biased
+    estimate of the true Sharpe.
+    """
     mean_train_sharpe: float
     mean_test_sharpe: float
     std_test_sharpe: float
@@ -119,17 +125,21 @@ class AggregateMetrics:
     best_oos_sharpe: float
     n_folds: int
     total_oos_trades: int
+    deflated_sharpe: float = 0.0
+    probabilistic_sharpe: float = 0.0
 
     def __str__(self) -> str:
         return (
             f"Walk-Forward Validation Results ({self.n_folds} folds):\n"
-            f"  Mean Train Sharpe: {self.mean_train_sharpe:.3f}\n"
-            f"  Mean Test Sharpe:  {self.mean_test_sharpe:.3f} (std: {self.std_test_sharpe:.3f})\n"
-            f"  Overfit Ratio:     {self.mean_overfit_ratio:.2f}\n"
-            f"  % Profitable OOS:  {self.pct_profitable_oos:.1%}\n"
-            f"  Worst OOS Sharpe:  {self.worst_oos_sharpe:.3f}\n"
-            f"  Best OOS Sharpe:   {self.best_oos_sharpe:.3f}\n"
-            f"  Total OOS Trades:  {self.total_oos_trades}"
+            f"  Mean Train Sharpe:      {self.mean_train_sharpe:.3f}\n"
+            f"  Mean Test Sharpe:       {self.mean_test_sharpe:.3f} (std: {self.std_test_sharpe:.3f})\n"
+            f"  Probabilistic Sharpe:   {self.probabilistic_sharpe:.2%}\n"
+            f"  Deflated Sharpe:        {self.deflated_sharpe:.2%}\n"
+            f"  Overfit Ratio:          {self.mean_overfit_ratio:.2f}\n"
+            f"  % Profitable OOS:       {self.pct_profitable_oos:.1%}\n"
+            f"  Worst OOS Sharpe:       {self.worst_oos_sharpe:.3f}\n"
+            f"  Best OOS Sharpe:        {self.best_oos_sharpe:.3f}\n"
+            f"  Total OOS Trades:       {self.total_oos_trades}"
         )
 
     @property
@@ -137,15 +147,21 @@ class AggregateMetrics:
         """
         Check if strategy passes minimum validation criteria.
 
-        Criteria:
+        Criteria (tightened after refinement audit):
         1. Mean OOS Sharpe > 0 (positive expected return)
         2. Overfit ratio > 0.4 (not severely overfitted)
         3. At least 50% of folds profitable
+        4. Deflated Sharpe ≥ 0.90 (≥90% confidence true SR > selection-adjusted benchmark)
+
+        The DSR gate is the critical addition: without it, walk-forward
+        validation still permits selection-bias inflation when the test
+        set ends up favorable by chance.
         """
         return (
             self.mean_test_sharpe > 0 and
             self.mean_overfit_ratio > 0.4 and
-            self.pct_profitable_oos >= 0.5
+            self.pct_profitable_oos >= 0.5 and
+            self.deflated_sharpe >= 0.90
         )
 
 
@@ -576,16 +592,50 @@ class WalkForwardValidator:
         test_sharpes = [r.test_sharpe for r in results]
         overfit_ratios = [r.overfit_ratio for r in results if r.train_sharpe != 0]
 
+        mean_test_sharpe = float(np.mean(test_sharpes))
+        std_test_sharpe = float(np.std(test_sharpes, ddof=1)) if len(test_sharpes) > 1 else 0.0
+
+        # --- Probabilistic Sharpe & Deflated Sharpe --------------------------
+        # Bailey & Lopez de Prado (2012, 2014). Here we treat each fold's
+        # test-Sharpe as one observation; variance across folds proxies the
+        # estimation variance. This answers: given that we ran N folds, how
+        # likely is it that the realized average is not noise?
+        from scipy import stats as _stats
+        n_folds = len(test_sharpes)
+
+        if n_folds >= 2 and std_test_sharpe > 0:
+            # Probabilistic Sharpe (benchmark = 0): P(true SR > 0 | observed SR)
+            # PSR = Φ( SR * sqrt(n-1) ) under Gaussian approximation.
+            # Using SR_mean and cross-fold variance as the Sharpe estimate.
+            t_stat = mean_test_sharpe / (std_test_sharpe / np.sqrt(n_folds))
+            probabilistic_sharpe = float(_stats.norm.cdf(t_stat))
+
+            # Deflated Sharpe: adjust benchmark for selection from N trials.
+            # Expected max of N SRs under null (order statistic approximation).
+            euler_mascheroni = 0.5772156649
+            max_z = (
+                (1.0 - euler_mascheroni) * _stats.norm.ppf(1.0 - 1.0 / n_folds) +
+                euler_mascheroni * _stats.norm.ppf(1.0 - 1.0 / (n_folds * np.e))
+            )
+            sr_benchmark = std_test_sharpe * max_z
+            t_stat_deflated = (mean_test_sharpe - sr_benchmark) / (std_test_sharpe / np.sqrt(n_folds))
+            deflated_sharpe = float(_stats.norm.cdf(t_stat_deflated))
+        else:
+            probabilistic_sharpe = 1.0 if mean_test_sharpe > 0 else 0.0
+            deflated_sharpe = 0.5  # Insufficient data for deflation
+
         return AggregateMetrics(
-            mean_train_sharpe=np.mean(train_sharpes),
-            mean_test_sharpe=np.mean(test_sharpes),
-            std_test_sharpe=np.std(test_sharpes),
-            mean_overfit_ratio=np.mean(overfit_ratios) if overfit_ratios else 0.0,
+            mean_train_sharpe=float(np.mean(train_sharpes)),
+            mean_test_sharpe=mean_test_sharpe,
+            std_test_sharpe=std_test_sharpe,
+            mean_overfit_ratio=float(np.mean(overfit_ratios)) if overfit_ratios else 0.0,
             pct_profitable_oos=sum(1 for s in test_sharpes if s > 0) / len(test_sharpes),
-            worst_oos_sharpe=min(test_sharpes),
-            best_oos_sharpe=max(test_sharpes),
-            n_folds=len(results),
+            worst_oos_sharpe=float(min(test_sharpes)),
+            best_oos_sharpe=float(max(test_sharpes)),
+            n_folds=n_folds,
             total_oos_trades=sum(r.test_n_trades for r in results),
+            deflated_sharpe=deflated_sharpe,
+            probabilistic_sharpe=probabilistic_sharpe,
         )
 
 

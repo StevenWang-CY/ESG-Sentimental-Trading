@@ -1,16 +1,23 @@
 """
 Portfolio Constructor
-Converts signals to portfolio weights for trading
+Converts signals to portfolio weights for trading.
+
+Academic references:
+- Grinold & Kahn (2000) "Active Portfolio Management" — sector-neutral
+  construction to isolate stock-selection alpha from unintended factor bets.
+- Clarke, de Silva & Thorley (2002) "Portfolio Constraints and the
+  Fundamental Law of Active Management", Financial Analysts Journal.
+- Menchero, Orr & Wang (2011) "Portfolio Construction and Risk Budgeting".
 """
 
 import pandas as pd
 import numpy as np
-from typing import Optional
+from typing import Dict, Optional
 
 
 class PortfolioConstructor:
     """
-    Converts signals to portfolio weights
+    Converts signals to portfolio weights with optional sector neutrality.
     """
 
     def __init__(
@@ -19,17 +26,35 @@ class PortfolioConstructor:
         selection_balance: str = 'equal_count',
         exposure_model: str = 'dollar_neutral',
         gross_exposure_target: float = 1.0,
+        sector_map: Optional[Dict[str, str]] = None,
+        max_sector_net_exposure: float = 0.10,
+        turnover_penalty: float = 0.0,
     ):
         """
-        Initialize portfolio constructor
+        Initialize portfolio constructor.
 
         Args:
             strategy_type: 'long_short', 'long_only', or 'short_only'
+            selection_balance: 'equal_count' or 'none'
+            exposure_model: 'dollar_neutral' or legacy non-neutral modes
+            gross_exposure_target: Target gross exposure (default 1.0)
+            sector_map: Dict mapping ticker -> GICS sector name (e.g., 'Energy').
+                When provided, `apply_sector_neutrality` clamps the *net*
+                exposure inside each sector to ±max_sector_net_exposure.
+            max_sector_net_exposure: Maximum allowed |net sector weight| as a
+                fraction of gross exposure. Default 10% ≈ Grinold-Kahn's
+                recommended ceiling for unintended factor bets.
+            turnover_penalty: Quadratic penalty coefficient (0=off) used by
+                `apply_turnover_penalty` for shrinking weights toward previous
+                holdings when turnover would exceed the bandwidth.
         """
         self.strategy_type = strategy_type
         self.selection_balance = selection_balance
         self.exposure_model = exposure_model
         self.gross_exposure_target = gross_exposure_target
+        self.sector_map = sector_map or {}
+        self.max_sector_net_exposure = max_sector_net_exposure
+        self.turnover_penalty = turnover_penalty
 
     def _resolve_selection_balance(
         self,
@@ -470,6 +495,140 @@ class PortfolioConstructor:
             portfolio.loc[portfolio['weight'] < 0, 'weight'] *= side_target / short_sum
 
         return portfolio
+
+    def apply_sector_neutrality(
+        self,
+        portfolio: pd.DataFrame,
+        sector_map: Optional[Dict[str, str]] = None,
+        max_sector_net_exposure: Optional[float] = None,
+    ) -> pd.DataFrame:
+        """
+        Clamp the net weight inside each sector to ±max_sector_net_exposure
+        of gross exposure. This isolates stock-selection alpha from
+        unintended sector factor tilts.
+
+        Algorithm (per rebalance date):
+            1. Map each ticker to its sector.
+            2. Compute net_sector_weight = sum(weights in sector).
+            3. If |net_sector_weight| > cap:
+                a. Identify the "offending" side (longs if net>0, shorts if net<0).
+                b. Reduce offending-side weights proportionally until
+                   the sector's net exposure == ±cap.
+            4. Renormalize each side back to the side target to preserve
+               dollar-neutrality.
+
+        Args:
+            portfolio: DataFrame with [ticker, date, weight] (date optional).
+            sector_map: Optional override for per-call sector mapping.
+            max_sector_net_exposure: Optional override for the cap.
+
+        Returns:
+            Sector-neutralized portfolio DataFrame.
+        """
+        if portfolio.empty:
+            return portfolio
+
+        sector_map = sector_map or self.sector_map
+        cap = max_sector_net_exposure if max_sector_net_exposure is not None else self.max_sector_net_exposure
+        if not sector_map or cap <= 0:
+            return portfolio
+
+        portfolio = portfolio.copy()
+        portfolio['sector'] = portfolio['ticker'].map(sector_map).fillna('UNMAPPED')
+
+        if 'date' in portfolio.columns:
+            group_keys = ['date', 'sector']
+        else:
+            group_keys = ['sector']
+
+        gross = portfolio['weight'].abs().sum()
+        if gross == 0:
+            return portfolio.drop(columns=['sector'])
+
+        cap_abs = cap * gross
+
+        def _clamp_sector(group: pd.DataFrame) -> pd.DataFrame:
+            net = group['weight'].sum()
+            if abs(net) <= cap_abs:
+                return group
+            # Reduce the side driving the imbalance so that net exposure → ±cap
+            target_net = np.sign(net) * cap_abs
+            excess = net - target_net  # How much to remove
+            if net > 0:
+                mask = group['weight'] > 0
+            else:
+                mask = group['weight'] < 0
+            offending = group.loc[mask, 'weight']
+            offending_sum = offending.sum()
+            if offending_sum == 0:
+                return group
+            shrink = 1.0 - (excess / offending_sum)
+            # Guard against flipping signs — floor at 0
+            shrink = max(0.0, float(shrink))
+            group.loc[mask, 'weight'] *= shrink
+            return group
+
+        portfolio = portfolio.groupby(group_keys, group_keys=False).apply(_clamp_sector)
+
+        # Renormalize each side to preserve exposure_model target
+        if self.exposure_model == 'dollar_neutral' and self.strategy_type == 'long_short':
+            side_target = self.gross_exposure_target / 2.0
+            long_mask = portfolio['weight'] > 0
+            short_mask = portfolio['weight'] < 0
+            long_sum = portfolio.loc[long_mask, 'weight'].sum()
+            short_sum = portfolio.loc[short_mask, 'weight'].abs().sum()
+            if long_sum > 0:
+                portfolio.loc[long_mask, 'weight'] *= side_target / long_sum
+            if short_sum > 0:
+                portfolio.loc[short_mask, 'weight'] *= side_target / short_sum
+
+        return portfolio.drop(columns=['sector'])
+
+    def apply_turnover_penalty(
+        self,
+        target_portfolio: pd.DataFrame,
+        current_portfolio: pd.DataFrame,
+        turnover_budget: float = 0.50,
+    ) -> pd.DataFrame:
+        """
+        Shrink target weights toward current weights when projected turnover
+        exceeds the budget.
+
+        One-sided turnover = 0.5 * Σ|w_target - w_current|
+
+        When turnover > budget, we linearly interpolate:
+            w_new = w_current + (budget / turnover) * (w_target - w_current)
+
+        Args:
+            target_portfolio: Desired weights from signals.
+            current_portfolio: Currently held weights.
+            turnover_budget: Max allowed one-sided turnover (e.g., 0.50 = 50%).
+
+        Returns:
+            Turnover-constrained portfolio.
+        """
+        if target_portfolio.empty or current_portfolio.empty:
+            return target_portfolio
+
+        target_cols = [c for c in ['ticker', 'weight'] if c in target_portfolio.columns]
+        current_cols = [c for c in ['ticker', 'weight'] if c in current_portfolio.columns]
+        target = target_portfolio[target_cols].rename(columns={'weight': 'target'})
+        current = current_portfolio[current_cols].rename(columns={'weight': 'current'})
+        merged = pd.merge(target, current, on='ticker', how='outer').fillna(0.0)
+
+        delta = merged['target'] - merged['current']
+        turnover = delta.abs().sum() / 2.0
+
+        if turnover <= turnover_budget or turnover == 0:
+            merged['weight'] = merged['target']
+        else:
+            shrink = turnover_budget / turnover
+            merged['weight'] = merged['current'] + shrink * delta
+
+        result = merged[merged['weight'] != 0][['ticker', 'weight']].reset_index(drop=True)
+        if 'date' in target_portfolio.columns:
+            result['date'] = target_portfolio['date'].iloc[0]
+        return result
 
     def get_portfolio_statistics(self, portfolio: pd.DataFrame) -> dict:
         """
