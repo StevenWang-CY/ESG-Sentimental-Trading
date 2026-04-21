@@ -1,6 +1,17 @@
 """
 Factor Analysis
-Performs Fama-French factor regression to prove alpha
+Performs Fama-French factor regression to prove alpha.
+
+Academic references:
+- Fama, E. & French, K. (1993) "Common risk factors in the returns on stocks
+  and bonds", Journal of Financial Economics.
+- Fama, E. & French, K. (2015) "A five-factor asset pricing model", JFE.
+- Carhart, M. (1997) "On persistence in mutual fund performance", Journal of Finance.
+- Newey, W.K. & West, K.D. (1987) "A Simple, Positive Semi-Definite,
+  Heteroskedasticity and Autocorrelation Consistent Covariance Matrix",
+  Econometrica. HAC estimators are required when residuals exhibit
+  heteroskedasticity or serial correlation (as typical in event-driven
+  strategies with overlapping positions).
 """
 
 import pandas as pd
@@ -21,9 +32,17 @@ class FactorAnalysis:
     Performs factor attribution analysis using Fama-French factors
     """
 
-    def __init__(self):
-        """Initialize factor analysis"""
+    def __init__(self, hac_lags: Optional[int] = None):
+        """Initialize factor analysis.
+
+        Args:
+            hac_lags: Newey-West HAC lag length. If None, defaults to the
+                automatic rule-of-thumb floor(4 * (n/100)^(2/9)) which is
+                the standard bandwidth from Newey-West (1994). Set to 0
+                to use classical (non-HAC) OLS standard errors.
+        """
         self.factors = None
+        self.hac_lags = hac_lags
 
     def load_factors(self, factors_df: pd.DataFrame):
         """
@@ -84,31 +103,63 @@ class FactorAnalysis:
         X = merged[factor_cols]
         X = sm.add_constant(X)  # Add intercept (this is alpha)
 
-        # Run OLS regression
+        # Run OLS regression with Newey-West HAC standard errors
+        # (robust to heteroskedasticity + autocorrelation of unknown form).
         try:
-            model = sm.OLS(y, X).fit()
+            n_obs = len(merged)
+            if self.hac_lags is None:
+                # Newey-West (1994) automatic bandwidth rule of thumb.
+                # Ensures at least 1 lag for small samples.
+                nw_lags = max(1, int(np.floor(4 * (n_obs / 100.0) ** (2.0 / 9.0))))
+            else:
+                nw_lags = int(self.hac_lags)
 
-            # Extract results
+            ols_model = sm.OLS(y, X)
+            if nw_lags > 0:
+                model = ols_model.fit(
+                    cov_type='HAC',
+                    cov_kwds={'maxlags': nw_lags},
+                )
+                cov_type_used = f'HAC (Newey-West, lags={nw_lags})'
+            else:
+                model = ols_model.fit()
+                cov_type_used = 'Classical OLS'
+
+            # Extract results — t-stats and p-values now use HAC covariance
             alpha_daily = model.params['const']
             alpha_annual = alpha_daily * 252
             alpha_tstat = model.tvalues['const']
             alpha_pvalue = model.pvalues['const']
 
-            # Extract betas
+            # 95% CI for annualized alpha based on HAC standard errors
+            alpha_se_daily = model.bse['const']
+            alpha_se_annual = alpha_se_daily * 252
+            ci_low = alpha_annual - 1.96 * alpha_se_annual
+            ci_high = alpha_annual + 1.96 * alpha_se_annual
+
+            # Extract betas with their HAC t-stats
             betas = {}
+            beta_tstats = {}
             for col in factor_cols:
                 if col in model.params:
                     betas[col] = model.params[col]
+                    beta_tstats[col] = model.tvalues[col]
 
             return {
                 'alpha_annual': alpha_annual,
                 'alpha_daily': alpha_daily,
                 'alpha_tstat': alpha_tstat,
                 'alpha_pvalue': alpha_pvalue,
+                'alpha_se_annual': alpha_se_annual,
+                'alpha_ci_95_low': ci_low,
+                'alpha_ci_95_high': ci_high,
                 'betas': betas,
+                'beta_tstats': beta_tstats,
                 'r_squared': model.rsquared,
                 'adj_r_squared': model.rsquared_adj,
-                'n_observations': len(merged),
+                'n_observations': n_obs,
+                'cov_type': cov_type_used,
+                'nw_lags': nw_lags,
                 'residuals': model.resid,
                 'full_summary': model.summary()
             }
@@ -178,6 +229,14 @@ class FactorAnalysis:
         tstat = results['alpha_tstat']
         pval = results['alpha_pvalue']
 
+        cov_type = results.get('cov_type', 'Classical OLS')
+        ci_low = results.get('alpha_ci_95_low')
+        ci_high = results.get('alpha_ci_95_high')
+        ci_str = (
+            f"95% CI: [{ci_low*100:.2f}%, {ci_high*100:.2f}%]\n"
+            if ci_low is not None and ci_high is not None else ""
+        )
+
         interpretation = f"""
 FACTOR REGRESSION RESULTS
 ========================
@@ -185,7 +244,8 @@ FACTOR REGRESSION RESULTS
 Annualized Alpha: {alpha*100:.2f}%
 T-Statistic: {tstat:.2f}
 P-Value: {pval:.4f}
-N Observations: {results.get('n_observations', 0)}
+Std Error: {cov_type}
+{ci_str}N Observations: {results.get('n_observations', 0)}
 
 """
 

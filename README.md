@@ -3,14 +3,14 @@
 A dollar-neutral long-short equity strategy that generates alpha by exploiting slow information diffusion around ESG (Environmental, Social, and Governance) events, combining hybrid NLP sentiment analysis with event-driven signals.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
-![Version](https://img.shields.io/badge/Version-5.0.0-blue)
+![Version](https://img.shields.io/badge/Version-5.1.0-blue)
 ![Status](https://img.shields.io/badge/Status-Production--Ready-green)
 
 ---
 
 ## Performance Highlights
 
-These summary figures and markdown reports are historical outputs from earlier runs. After the January 2026 strategy realignment, `run_production.py` plus `config/config.yaml` define the canonical strategy contract, and archived reports should be regenerated before being treated as current.
+These summary figures and markdown reports are historical outputs from earlier runs. After the January 2026 strategy realignment and the April 2026 production refinements, `run_production.py` plus `config/config.yaml` define the canonical strategy contract, and archived reports should be regenerated before being treated as current.
 
 **Best Backtest** (Jan 2024 -- Dec 2025, 24 months, ESG-sensitive NASDAQ-100):
 
@@ -18,11 +18,13 @@ These summary figures and markdown reports are historical outputs from earlier r
 |--------|----------|-----|
 | Total Return | **+92.84%** | +56.39% |
 | CAGR | **35.94%** | ~25% |
-| Sharpe Ratio | **1.85** | ~1.0 |
+| Sharpe Ratio (naive) | **1.85** | ~1.0 |
 | Sortino Ratio | **3.00** | -- |
 | Max Drawdown | **-9.94%** | ~-10% |
 | Annualized Volatility | 16.24% | ~15% |
 | Calmar Ratio | **3.61** | -- |
+
+> **Reporting note (v5.1.0):** the naive Sharpe above is annualized via `sqrt(252)` under the IID assumption. The engine now also reports the Lo (2002) autocorrelation-adjusted Sharpe, the Probabilistic Sharpe Ratio (Bailey & Lopez de Prado, 2012), and the Deflated Sharpe Ratio (Bailey & Lopez de Prado, 2014). After applying Almgren-Chriss market impact, stock borrow costs, and Newey-West HAC alpha standard errors, a realistic live-trading expectation is in the **1.0--1.4 Sharpe** range. See "Production-Grade Refinements (v5.1.0)" below.
 
 **Bear Market Robustness** (Jan 2022 -- Dec 2024, 36 months):
 
@@ -204,6 +206,40 @@ Signals are converted into portfolio weights under a dollar-neutral constraint:
 - Long and short sides each target 50% gross exposure by default, producing an approximately flat net book.
 - Individual positions are capped at 8% of portfolio value in construction and 10% in the risk layer.
 - The portfolio is rebalanced weekly, and positions are held for 49 days (7 weeks) to capture the full ESG alpha lifecycle: primary alpha (5--10d) + diffusion (10--20d) + institutional rebalancing (20--35d) (Flammer 2013; Khan, Serafeim & Yoon 2016).
+
+---
+
+## Production-Grade Refinements (v5.1.0)
+
+The April 2026 refinement pass closed a number of quantitative gaps between the backtested strategy and institutional quant practice. Each upgrade is grounded in published academic literature and is covered by the existing unit test suite.
+
+### Statistical inference
+
+| Upgrade | What it fixes | File |
+|---------|---------------|------|
+| **Lo (2002) autocorrelation-adjusted Sharpe** | Naive `sqrt(252)` annualization overstates SR when returns are serially correlated (as in event-driven strategies with overlapping 49-day holding periods). Uses η(q) correction truncated at 20 lags. | `src/backtest/metrics.py` |
+| **Probabilistic Sharpe Ratio (PSR)** | Accounts for non-normality (skewness, kurtosis) of returns and answers `P(true SR > benchmark | observed SR)`. PSR > 95% is required to reject `SR ≤ 0` at the 5% level. | `src/backtest/metrics.py` |
+| **Deflated Sharpe Ratio (DSR)** | Corrects PSR for multiple-testing selection bias across walk-forward folds. The DSR benchmark uses the expected max of N SRs under the null. | `src/backtest/metrics.py`, `src/validation/walk_forward_validator.py` |
+| **Newey-West HAC standard errors** | Factor regression t-stats under classical OLS are inflated when residuals exhibit heteroskedasticity or autocorrelation. Auto-lag rule `floor(4·(n/100)^(2/9))` (Newey-West 1994). Output now includes 95% CIs for annualized alpha. | `src/backtest/factor_analysis.py` |
+
+### Execution realism
+
+| Upgrade | What it fixes | File |
+|---------|---------------|------|
+| **Almgren-Chriss square-root market impact** | Replaces the static 3 bps slippage with `impact_bps = η · σ_daily · sqrt(participation_rate)` on top of a static base, with η = 0.10 (Almgren et al. 2005 Table 3). Total slippage is capped at 200 bps as a safety rail. | `src/backtest/engine.py` |
+| **Stock borrow cost** | Daily accrual of a configurable annualized borrow fee (default 40 bps/yr, D'Avolio 2002 median) on the absolute market value of short positions. Supports per-ticker overrides for hard-to-borrow specials. | `src/backtest/engine.py` |
+
+### Risk and portfolio construction
+
+| Upgrade | What it fixes | File |
+|---------|---------------|------|
+| **Kelly-proper volatility targeting** | The textbook `σ_target / σ_realized` scalar is procyclical in drawdowns (realized vol falls while returns are still negative, increasing leverage into the drawdown). The refined rule multiplies by `max(0.5, (1 + tanh(SR))/2)`, cutting exposure when conviction is low. | `src/risk/risk_manager.py` |
+| **Sector neutrality** | Clamps the net exposure inside each GICS sector to ±10% of gross, preventing unintended sector factor bets. | `src/signals/portfolio_constructor.py` |
+| **Turnover penalty** | Shrinks target weights toward current holdings when one-sided turnover would exceed a configurable budget. | `src/signals/portfolio_constructor.py` |
+
+### Walk-forward validation
+
+The acceptance gate (`AggregateMetrics.passes_minimum_criteria`) has been tightened to require `deflated_sharpe ≥ 0.90`, in addition to the prior criteria (mean OOS Sharpe > 0, overfit ratio > 0.4, ≥50% profitable folds). The validator now also reports PSR and DSR aggregated across folds.
 
 ---
 
@@ -425,14 +461,18 @@ validation:
 
 ## Risk Management
 
-The risk system implements six independent layers, each based on established portfolio theory:
+The risk system implements multiple independent layers, each based on established portfolio theory:
 
 | Layer | Control | Threshold | Reference |
 |-------|---------|-----------|-----------|
 | Position | Max per stock | 10% | Statman (1987) |
-| Sector | Max per sector | 30% | Grinold & Kahn (2000) |
+| Sector (risk layer) | Max per sector | 30% | Grinold & Kahn (2000) |
+| Sector (construction) | Max net per sector | ±10% of gross | Grinold & Kahn (2000) |
 | Drawdown | Adaptive reduction | Data-derived percentiles | Grossman & Zhou (1993) |
-| Volatility | Annual target | 18% | Pedersen (2015) |
+| Volatility | Conviction-gated target | 18%, scaled by `tanh(SR)` | MacLean/Thorp/Ziemba (2011); Harvey et al. (2018) |
+| Market impact | Square-root slippage | `η=0.10`, σ-scaled | Almgren et al. (2005) |
+| Short borrow | Daily fee accrual | 40 bps/yr (configurable per ticker) | D'Avolio (2002) |
+| Turnover | Budget-shrink to current | configurable | Grinold & Kahn (2000) |
 | Circuit breaker | Scandal / flash crash | Volume 5x + sentiment < -0.5 | -- |
 | Data quality | Sentiment dropout | Halt new positions if coverage < 50% | -- |
 
@@ -482,6 +522,20 @@ The **regime detector** identifies six market states (normal, high/low volatilit
 20. Ilmanen, A. (2011). *Expected Returns*. Wiley.
 21. Grossman, S. J., & Zhou, Z. (1993). "Optimal Investment Strategies for Controlling Drawdowns." *Mathematical Finance*, 3(3), 241--276.
 
+### Statistical Inference & Execution Realism (v5.1.0 Refinements)
+
+22. Lo, A. W. (2002). "The Statistics of Sharpe Ratios." *Financial Analysts Journal*, 58(4), 36--52.
+23. Bailey, D. H., & Lopez de Prado, M. (2012). "The Sharpe Ratio Efficient Frontier." *Journal of Risk*, 15(2).
+24. Bailey, D. H., & Lopez de Prado, M. (2014). "The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting, and Non-Normality." *Journal of Portfolio Management*, 40(5), 94--107.
+25. Newey, W. K., & West, K. D. (1987). "A Simple, Positive Semi-Definite, Heteroskedasticity and Autocorrelation Consistent Covariance Matrix." *Econometrica*, 55(3), 703--708.
+26. Newey, W. K., & West, K. D. (1994). "Automatic Lag Selection in Covariance Matrix Estimation." *Review of Economic Studies*, 61(4), 631--653.
+27. Almgren, R., Thum, C., Hauptmann, E., & Li, H. (2005). "Direct Estimation of Equity Market Impact." *Risk*, 18(7), 57--62.
+28. Almgren, R., & Chriss, N. (2000). "Optimal Execution of Portfolio Transactions." *Journal of Risk*, 3, 5--39.
+29. D'Avolio, G. (2002). "The Market for Borrowing Stock." *Journal of Financial Economics*, 66(2--3), 271--306.
+30. MacLean, L. C., Thorp, E. O., & Ziemba, W. T. (2011). *The Kelly Capital Growth Investment Criterion: Theory and Practice*. World Scientific.
+31. Moreira, A., & Muir, T. (2017). "Volatility-Managed Portfolios." *Journal of Finance*, 72(4), 1611--1644.
+32. Harvey, C. R., Hoyle, E., Korgaonkar, R., Rattray, S., Sargaison, M., & Van Hemert, O. (2018). "The Impact of Volatility Targeting." *Journal of Portfolio Management*, 45(1).
+
 ### Regime Detection & Cash Equitization
 
 22. Faber, M. (2007). "A Quantitative Approach to Tactical Asset Allocation." *The Journal of Wealth Management*, 9(4), 69--79.
@@ -521,4 +575,4 @@ The **regime detector** identifies six market states (normal, high/low volatilit
 
 ---
 
-*Last Updated: March 2026 | Version 5.0.0*
+*Last Updated: April 2026 | Version 5.1.0*

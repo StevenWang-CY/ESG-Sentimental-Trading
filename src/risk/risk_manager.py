@@ -142,36 +142,70 @@ class RiskManager:
                                     portfolio: pd.DataFrame,
                                     returns_history: pd.Series) -> pd.DataFrame:
         """
-        Scale portfolio to target volatility level
+        Scale portfolio to target volatility level with a fractional-Kelly
+        conviction gate.
 
-        Based on: Kelly Criterion and volatility targeting frameworks
-        Formula: target_weight = (expected_return / variance) * target_vol / realized_vol
+        The textbook vol-target scalar σ_target / σ_realized ignores expected
+        return entirely: in a drawdown where recent returns are negative, naive
+        vol targeting will *increase* leverage, which is procyclical and
+        well-documented to destroy risk-adjusted performance in crises
+        (Harvey et al. 2018, JPM).
+
+        The refined rule:
+
+            vol_scalar = (σ_target / σ_realized)
+            conviction = tanh(recent_SR / kelly_reference)        # ∈ [-1, 1]
+            scaler     = vol_scalar * conviction_weight           # conviction-weighted
+
+        where conviction_weight = max(conviction_floor, (1 + conviction)/2).
+
+        When the strategy has been performing in-line (SR ≈ kelly_reference ≈ 1),
+        conviction_weight ≈ 0.88 (close to naive target). In a severe drawdown
+        (SR ≈ -2), conviction_weight collapses to the conviction_floor (default
+        0.5), cutting exposure in half and avoiding the classic procyclicality.
+
+        Formula derived from fractional Kelly (MacLean, Thorp & Ziemba 2011):
+            f* = μ / σ²  →  scaled weight ∝ (μ/σ) * (1/σ) = SR/σ
+        which reduces to naive vol targeting only when μ/σ (Sharpe) is constant.
 
         Academic basis:
-        - Moreira & Muir (2017) "Volatility-Managed Portfolios", JFE
-        - Harvey et al. (2018) "The Impact of Volatility Targeting", JPM
+        - MacLean, Thorp & Ziemba (2011) "The Kelly Capital Growth Investment
+          Criterion", World Scientific.
+        - Moreira & Muir (2017) "Volatility-Managed Portfolios", JFE.
+        - Harvey et al. (2018) "The Impact of Volatility Targeting", JPM.
         """
         # Calculate realized volatility (20-day rolling)
         if len(returns_history) >= 20:
-            realized_vol = returns_history.tail(20).std() * np.sqrt(252)
+            recent = returns_history.tail(20)
         else:
-            realized_vol = returns_history.std() * np.sqrt(252)
+            recent = returns_history
+        realized_vol = recent.std() * np.sqrt(252)
 
         if realized_vol == 0 or np.isnan(realized_vol):
             return portfolio
 
         self.realized_volatility = realized_vol
 
-        # Scale positions to target volatility
+        # Base volatility scalar
         vol_scalar = self.target_volatility / realized_vol
+
+        # Conviction weight from recent realized Sharpe (fractional Kelly)
+        mean_ret = recent.mean() * 252
+        realized_sharpe = mean_ret / realized_vol if realized_vol > 0 else 0.0
+        kelly_reference = 1.0  # Reference Sharpe: below this, we de-lever
+        conviction = np.tanh(realized_sharpe / kelly_reference)  # ∈ [-1, 1]
+        conviction_floor = 0.5
+        conviction_weight = max(conviction_floor, (1.0 + conviction) / 2.0)
+
+        scaler = vol_scalar * conviction_weight
 
         # Clip to prevent extreme scaling [0.3, 3.0]
         # Floor at 0.3: maintains minimum capacity during vol spikes
         # Cap at 3.0: prevents excessive leverage in low-vol environments
-        vol_scalar = np.clip(vol_scalar, 0.3, 3.0)
+        scaler = float(np.clip(scaler, 0.3, 3.0))
 
         portfolio = portfolio.copy()
-        portfolio['weight'] *= vol_scalar
+        portfolio['weight'] *= scaler
 
         return portfolio
 
