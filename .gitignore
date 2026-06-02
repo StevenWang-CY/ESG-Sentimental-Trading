@@ -58,6 +58,10 @@ results/factor_analysis/*
 results/visualizations/*
 results/plots/*
 results/backtest/*
+# Per-run machine-readable records written by run_production.py. A committed
+# sample bundle lives under examples/sample_run/ so the dashboard is populated
+# on a cold clone before any real run exists.
+results/runs/
 !results/figures/.gitkeep
 !results/tear_sheets/.gitkeep
 !results/factor_analysis/.gitkeep

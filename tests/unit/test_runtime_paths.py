@@ -5,6 +5,7 @@ Runtime-path smoke and regression tests.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 from datetime import datetime
 
@@ -201,12 +202,18 @@ def test_run_production_smoke_uses_canonical_runtime_contract(monkeypatch, tmp_p
             ]
 
     class FakePriceFetcher:
+        def __init__(self, use_mock=False):
+            self.use_mock = use_mock
+
         @staticmethod
         def fetch_price_data(tickers, start_date, end_date):
             dates = pd.date_range(start_date, end_date, freq="B")
             return _make_price_panel(dates, tickers)
 
     class FakeFamaFrenchFactors:
+        def __init__(self, use_mock=False):
+            self.use_mock = use_mock
+
         @staticmethod
         def load_ff_factors(start_date, end_date, frequency):
             return pd.DataFrame({"Mkt-RF": [0.0]}, index=pd.date_range(start_date, periods=1))
@@ -357,6 +364,22 @@ def test_run_production_smoke_uses_canonical_runtime_contract(monkeypatch, tmp_p
         def get_daily_returns():
             return pd.Series([0.01, -0.005, 0.007], index=pd.date_range("2024-01-01", periods=3))
 
+        @staticmethod
+        def get_equity_curve():
+            return pd.Series([1_000_000.0, 1_010_000.0, 1_025_000.0],
+                             index=pd.date_range("2024-01-01", periods=3))
+
+        @staticmethod
+        def get_drawdown_series():
+            return pd.Series([0.0, 0.0, 0.0], index=pd.date_range("2024-01-01", periods=3))
+
+        @staticmethod
+        def get_exposure_series():
+            return pd.DataFrame(
+                {"gross_exposure": [1.0, 1.0, 1.0], "net_exposure": [0.0, 0.0, 0.0]},
+                index=pd.date_range("2024-01-01", periods=3),
+            )
+
     class FakeBacktestEngine:
         def __init__(self, **kwargs):
             captured["backtest_init"] = kwargs
@@ -378,7 +401,30 @@ def test_run_production_smoke_uses_canonical_runtime_contract(monkeypatch, tmp_p
         def print_tear_sheet():
             return None
 
+        @staticmethod
+        def flatten(tear_sheet=None):
+            # Canonical FLAT metrics contract consumed by the run JSON + validator.
+            return {
+                "sharpe_ratio": 0.80, "sharpe_ratio_lo_adjusted": 0.70,
+                "probabilistic_sharpe": 0.65, "deflated_sharpe": 0.60,
+                "sortino_ratio": 1.40, "annualized_return": 0.05,
+                "annualized_return_pct": 5.0, "cagr": 0.05,
+                "total_return": 0.025, "total_return_pct": 2.5,
+                "volatility": 0.10, "volatility_pct": 10.0,
+                "max_drawdown": -0.05, "max_drawdown_pct": -5.0,
+                "calmar_ratio": 1.0, "turnover": 8.0, "num_trades": 2, "win_rate": 0.5,
+            }
+
+        @staticmethod
+        def save_tear_sheet(path):
+            with open(path, "w") as f:
+                f.write("sharpe_ratio                  :       0.80\n")
+
     class FakeFactorAnalysis:
+        # Current factor contract (alpha_annual / betas), matching
+        # src/backtest/factor_analysis.py -- NOT the stale alpha_annualized/
+        # coefficients keys, so run_production's reads exercise the real path
+        # instead of silently hitting the swallowed-exception branch (DRIFT-04).
         @staticmethod
         def load_factors(factors):
             return None
@@ -386,11 +432,33 @@ def test_run_production_smoke_uses_canonical_runtime_contract(monkeypatch, tmp_p
         @staticmethod
         def run_regression(returns):
             return {
-                "alpha_annualized": 0.01,
+                "alpha_annual": 0.01,
+                "alpha_daily": 0.01 / 252,
                 "alpha_tstat": 1.0,
                 "alpha_pvalue": 0.2,
-                "coefficients": {"mkt_rf": 0.0},
+                "betas": {"Mkt-RF": 0.10},
+                "beta_tstats": {"Mkt-RF": 2.0},
+                "r_squared": 0.30,
+                "adj_r_squared": 0.28,
+                "n_observations": 3,
+                "cov_type": "HAC (Newey-West, lags=1)",
+                "nw_lags": 1,
             }
+
+    class FakeValidator:
+        # Avoids depending on a real config/config.yaml under tmp_path and lets us
+        # assert run_production passes the FLAT metrics dict to the validator.
+        def __init__(self, config_path=None, criteria=None):
+            pass
+
+        @staticmethod
+        def run_pre_flight_checks(universe_size=None):
+            return True, []
+
+        @staticmethod
+        def validate_backtest_results(results_dict):
+            captured["validated_metrics"] = results_dict
+            return True, []
 
     monkeypatch.setattr(run_production, "UniverseFetcher", FakeUniverseFetcher)
     monkeypatch.setattr(run_production, "SECDownloader", FakeSECDownloader)
@@ -407,6 +475,9 @@ def test_run_production_smoke_uses_canonical_runtime_contract(monkeypatch, tmp_p
     monkeypatch.setattr(run_production, "BacktestEngine", FakeBacktestEngine)
     monkeypatch.setattr(run_production, "PerformanceAnalyzer", FakePerformanceAnalyzer)
     monkeypatch.setattr(run_production, "FactorAnalysis", FakeFactorAnalysis)
+    # main() imports the validator locally via `from scripts.validate_backtest import
+    # BacktestValidator`, so patch it at its source module.
+    monkeypatch.setattr("scripts.validate_backtest.BacktestValidator", FakeValidator)
     monkeypatch.setattr(
         run_production.sys,
         "argv",
@@ -438,3 +509,22 @@ def test_run_production_smoke_uses_canonical_runtime_contract(monkeypatch, tmp_p
     assert captured["backtest_init"]["adaptive_drawdown_thresholds"] is True
     assert captured["backtest_run"]["rebalance_freq"] == "W"
     assert captured["backtest_run"]["holding_period"] == 49
+
+    # The post-backtest validator must receive the canonical FLAT metrics dict
+    # (DRIFT-01: previously the nested tear-sheet dict was passed and every
+    # check silently skipped).
+    assert "validated_metrics" in captured
+    assert captured["validated_metrics"]["sharpe_ratio"] == pytest.approx(0.80)
+    assert captured["validated_metrics"]["max_drawdown_pct"] == pytest.approx(-5.0)
+    assert captured["validated_metrics"]["num_trades"] == 2
+
+    # run_production must persist the canonical machine-readable run record, and
+    # the factor stage must have completed via the real key contract (alpha_annual)
+    # rather than the swallowed-exception path (DRIFT-04 / ERR-01).
+    run_files = sorted((tmp_path / "results" / "runs").glob("run_*.json"))
+    assert run_files, "run_production must write a canonical run JSON"
+    run_record = json.loads(run_files[-1].read_text())
+    assert run_record["factor_status"] == "COMPLETE"
+    assert "alpha_annual" in run_record["factor"]
+    assert run_record["data_provenance"]["prices"] == "real"
+    assert {"sharpe_ratio", "max_drawdown_pct", "num_trades"}.issubset(run_record["metrics"].keys())

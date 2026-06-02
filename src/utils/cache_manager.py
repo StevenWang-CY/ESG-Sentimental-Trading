@@ -6,13 +6,44 @@ Implements 3-tier caching strategy:
 1. Immutable data: SEC filings, historical prices (never invalidate)
 2. Config-dependent: Events, signals (invalidate on config change)
 3. Time-fresh: Universe, recent data (invalidate by age)
+
+Provenance gating (DATA-05)
+---------------------------
+``is_cache_fresh`` answers "is this cache recent enough to reuse?" but says
+nothing about whether the cached payload is *real* data. A cache produced from
+synthetic/mock data, or a legacy cache written before provenance tracking
+existed, must NOT be trusted on a production run -- otherwise fabricated data
+re-enters the pipeline through the cache and is reported as real.
+
+Each cache file may carry a small JSON sidecar (``<path>.prov.json``) that
+records its provenance ('real' / 'mock' / 'empty'). Callers MUST:
+
+* call :func:`mark_cache_provenance` immediately after writing a cache file, and
+  MUST NOT write a cache (or must mark it 'mock') for synthetic/mock data;
+* call :func:`is_cache_trusted` before loading a cache, and refetch when it
+  returns ``False``.
+
+:func:`is_cache_trusted` returns ``False`` when the sidecar is MISSING (a legacy
+marker-less cache) or records ``mock`` data, so legacy caches are refetched by
+default and mock caches are never trusted.
 """
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
+
+from src.utils.provenance import REAL, MOCK, EMPTY
+
+logger = logging.getLogger(__name__)
+
+# Sidecar filename suffix that records the provenance of a cache file.
+# Stored as a small JSON document next to the .pkl (e.g. ``prices.pkl`` ->
+# ``prices.pkl.prov.json``) so the provenance survives independently of the
+# pickled payload.
+PROVENANCE_SIDECAR_SUFFIX = ".prov.json"
 
 
 def compute_config_hash(config_dict: Dict, keys: List[str]) -> str:
@@ -107,6 +138,127 @@ def is_cache_fresh(cache_file: Path, end_date: str, max_age_days: int = 60) -> b
     return file_age_hours < 24
 
 
+def _provenance_sidecar_path(cache_file: Path) -> Path:
+    """Return the provenance sidecar path for ``cache_file``.
+
+    The sidecar sits next to the cache file (e.g. ``prices.pkl`` ->
+    ``prices.pkl.prov.json``).
+    """
+    cache_file = Path(cache_file)
+    return cache_file.with_name(cache_file.name + PROVENANCE_SIDECAR_SUFFIX)
+
+
+def mark_cache_provenance(cache_file: Path, provenance: str) -> Path:
+    """Record the provenance of a cache file in a JSON sidecar.
+
+    Callers MUST invoke this immediately after writing a cache file so that a
+    later run can decide whether the cache is trustworthy. Do NOT write a real
+    cache for synthetic data: if data is mock, either skip caching entirely or
+    mark it explicitly as ``'mock'`` so :func:`is_cache_trusted` rejects it.
+
+    Args:
+        cache_file: Path to the cache file (.pkl) being described.
+        provenance: One of ``provenance.REAL`` / ``MOCK`` / ``EMPTY``.
+
+    Returns:
+        Path to the sidecar file that was written.
+    """
+    if provenance not in (REAL, MOCK, EMPTY):
+        raise ValueError(
+            f"Unknown provenance {provenance!r}; expected one of "
+            f"{REAL!r}, {MOCK!r}, {EMPTY!r}"
+        )
+
+    sidecar = _provenance_sidecar_path(cache_file)
+    payload = {
+        'provenance': provenance,
+        'cache_file': Path(cache_file).name,
+        'written_at': datetime.now().isoformat(timespec='seconds'),
+    }
+    try:
+        sidecar.write_text(json.dumps(payload, sort_keys=True))
+    except OSError as exc:
+        logger.warning("Failed to write provenance sidecar %s: %s", sidecar, exc)
+    return sidecar
+
+
+def read_cache_provenance(cache_file: Path) -> Optional[str]:
+    """Read the recorded provenance of a cache file.
+
+    Args:
+        cache_file: Path to the cache file (.pkl).
+
+    Returns:
+        The provenance string (``'real'`` / ``'mock'`` / ``'empty'``) if a valid
+        sidecar exists, otherwise ``None`` (legacy/marker-less cache).
+    """
+    sidecar = _provenance_sidecar_path(cache_file)
+    if not sidecar.exists():
+        return None
+
+    try:
+        payload = json.loads(sidecar.read_text())
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Corrupt provenance sidecar %s (%s); treating cache as untrusted.",
+            sidecar, exc,
+        )
+        return None
+
+    provenance = payload.get('provenance') if isinstance(payload, dict) else None
+    if provenance not in (REAL, MOCK, EMPTY):
+        logger.warning(
+            "Provenance sidecar %s has unrecognized value %r; "
+            "treating cache as untrusted.",
+            sidecar, provenance,
+        )
+        return None
+    return provenance
+
+
+def is_cache_trusted(cache_file: Path) -> bool:
+    """Whether a cache file may be loaded as real data.
+
+    This is the provenance gate that complements :func:`is_cache_fresh`
+    (freshness) -- a cache must be BOTH fresh AND trusted before it is loaded
+    on a production run.
+
+    Returns ``False`` when:
+    * the cache file does not exist;
+    * its provenance sidecar is MISSING (a legacy, marker-less cache); or
+    * its recorded provenance is ``'mock'`` (synthetic data).
+
+    Returns ``True`` only for caches explicitly marked ``'real'`` or ``'empty'``
+    (a legitimate real fetch that yielded no rows). Legacy caches therefore get
+    refetched by default and mock caches are never trusted.
+
+    Args:
+        cache_file: Path to the cache file (.pkl).
+
+    Returns:
+        True if the cache is safe to load as real data, else False.
+    """
+    cache_file = Path(cache_file)
+    if not cache_file.exists():
+        return False
+
+    provenance = read_cache_provenance(cache_file)
+    if provenance is None:
+        logger.info(
+            "Cache %s has no provenance marker (legacy); will refetch.",
+            cache_file.name,
+        )
+        return False
+    if provenance == MOCK:
+        logger.warning(
+            "Cache %s is marked as mock/synthetic; refusing to trust it.",
+            cache_file.name,
+        )
+        return False
+    # REAL or EMPTY -> trustworthy real-data provenance.
+    return True
+
+
 def build_cache_key(
     data_type: str,
     universe: str,
@@ -181,6 +333,14 @@ def clear_cache(data_dir: Path, data_type: Optional[str] = None) -> int:
             cache_file.unlink()
         except OSError:
             # File already deleted or permission error
+            pass
+        # Also remove the provenance sidecar so a future cache written to the
+        # same path does not inherit a stale (possibly mock) provenance marker.
+        sidecar = _provenance_sidecar_path(cache_file)
+        try:
+            sidecar.unlink()
+        except OSError:
+            # Sidecar absent (legacy cache) or permission error
             pass
 
     return len(cache_files)

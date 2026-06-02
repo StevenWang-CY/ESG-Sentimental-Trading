@@ -8,10 +8,14 @@ Based on:
 - Ilmanen (2011): "Expected Returns"
 """
 
+import logging
+
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, Tuple
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 class RiskManager:
@@ -34,7 +38,9 @@ class RiskManager:
                  stop_loss_pct: float = 0.10,           # 10% stop loss per position
                  min_positions: int = 5,                 # FIX 4.1: 5 for sparse ESG events (was 10)
                  leverage_limit: float = 1.0,           # Canonical neutral book gross exposure
-                 balance_long_short: bool = True):      # Enforce dollar neutrality (default: True)
+                 balance_long_short: bool = True,       # Enforce dollar neutrality (default: True)
+                 gross_exposure_target: Optional[float] = None,  # Final gross book size
+                 diversification_floor: int = 2):       # Apply haircut only below this many names
         """
         Initialize risk manager
 
@@ -46,6 +52,16 @@ class RiskManager:
             stop_loss_pct: Stop loss threshold per position
             min_positions: Minimum number of positions for diversification
             leverage_limit: Maximum leverage allowed
+            gross_exposure_target: Target gross exposure (sum of |weights|) the
+                book is renormalized back to AFTER all risk transforms, while
+                preserving dollar-neutrality. Defaults to ``leverage_limit``
+                when not supplied (a dollar-neutral book has gross = leverage).
+            diversification_floor: Hard floor on position count below which the
+                under-diversification haircut is applied. An intentionally
+                concentrated event-driven book (a handful of names) must NOT be
+                silently shrunk, so the 0.8 haircut only fires when the book has
+                fewer than this many positions. Default 2 (only a degenerate
+                single-name book is penalized).
         """
         self.max_position_size = max_position_size
         self.max_sector_exposure = max_sector_exposure
@@ -55,12 +71,25 @@ class RiskManager:
         self.min_positions = min_positions
         self.leverage_limit = leverage_limit
         self.balance_long_short = balance_long_short
+        # Default gross target to the leverage limit (dollar-neutral => gross == leverage).
+        self.gross_exposure_target = (
+            gross_exposure_target if gross_exposure_target is not None else leverage_limit
+        )
+        self.diversification_floor = diversification_floor
 
         # Track portfolio state
         self.portfolio_history = []
         self.current_drawdown = 0.0
         self.peak_value = 0.0
         self.realized_volatility = None
+        # Deliberate de-risk scalar applied on the most recent risk pass
+        # (vol-target de-levering and drawdown reduction). The final gross
+        # renormalization targets gross_exposure_target * this scalar so that
+        # intentional de-risking survives while pure book-reshaping does not
+        # silently bleed exposure.
+        self.last_risk_scalar = 1.0
+        self.last_realized_gross = 0.0
+        self.last_realized_net = 0.0
 
     def apply_risk_controls(self,
                            portfolio: pd.DataFrame,
@@ -84,6 +113,11 @@ class RiskManager:
 
         portfolio = portfolio.copy()
 
+        # Reset the deliberate de-risk scalar for this pass. Vol-target
+        # de-levering and drawdown reduction multiply into it; the final gross
+        # renormalization targets gross_exposure_target * last_risk_scalar.
+        self.last_risk_scalar = 1.0
+
         # 1. Position size limits
         portfolio = self._apply_position_limits(portfolio)
 
@@ -105,8 +139,16 @@ class RiskManager:
         # 5. Leverage limits
         portfolio = self._apply_leverage_limits(portfolio)
 
-        # 6. Ensure weights sum appropriately
+        # 6. Ensure weights sum appropriately (dollar-neutral rebalance)
         portfolio = self._normalize_weights(portfolio)
+
+        # 7. BT-06: FINAL renormalization back to the intended gross book size,
+        # preserving dollar-neutrality. Earlier steps (position caps, the
+        # diversification haircut, the dollar-neutral side rebalance) reshape the
+        # book and can silently leave realized gross well below target; this
+        # restores gross to gross_exposure_target * last_risk_scalar so that
+        # deliberate de-risking survives but incidental shrinkage does not.
+        portfolio = self._renormalize_to_gross_target(portfolio)
 
         return portfolio
 
@@ -126,13 +168,21 @@ class RiskManager:
 
     def _enforce_diversification(self, portfolio: pd.DataFrame) -> pd.DataFrame:
         """
-        Ensure minimum number of positions
+        Apply an under-diversification haircut ONLY to a degenerately small book.
 
         Based on: Statman (1987) - "How Many Stocks Make a Diversified Portfolio?"
-        Minimum 10-15 stocks for adequate diversification
+
+        The original rule shrank the book by 20% whenever the position count fell
+        below ``min_positions`` (5). For this strategy that silently penalized
+        intentionally-concentrated ESG event-driven baskets (2-4 names), bleeding
+        gross exposure on exactly the high-conviction events the strategy is built
+        to express. We instead gate the haircut on a hard ``diversification_floor``
+        (default 2): the 0.8 haircut now only fires for a book with fewer than the
+        floor (i.e., a degenerate single-name book), and the subsequent final
+        renormalization restores the intended gross_exposure_target anyway.
         """
-        if len(portfolio) < self.min_positions:
-            # Reduce position sizes to encourage more positions
+        if len(portfolio) < self.diversification_floor:
+            # Reduce position sizes only for a degenerate (sub-floor) book.
             scale_factor = 0.8  # Reduce by 20%
             portfolio['weight'] *= scale_factor
 
@@ -204,6 +254,12 @@ class RiskManager:
         # Cap at 3.0: prevents excessive leverage in low-vol environments
         scaler = float(np.clip(scaler, 0.3, 3.0))
 
+        # Record only the DE-LEVERING portion as deliberate de-risk for the final
+        # gross renormalization. A low-vol lever-up (scaler > 1.0) is allowed to
+        # reshape weights here but must not push realized gross above target, so
+        # the gross renorm clamps it back via min(scaler, 1.0).
+        self.last_risk_scalar *= min(scaler, 1.0)
+
         portfolio = portfolio.copy()
         portfolio['weight'] *= scaler
 
@@ -234,6 +290,9 @@ class RiskManager:
 
         # Minimum 50% exposure even in severe drawdown
         reduction_factor = max(reduction_factor, 0.5)
+
+        # Deliberate de-risk: carry into the final gross renormalization target.
+        self.last_risk_scalar *= reduction_factor
 
         portfolio['weight'] *= reduction_factor
 
@@ -271,6 +330,61 @@ class RiskManager:
         side_target = min(long_sum, short_sum)
         portfolio.loc[portfolio['weight'] > 0, 'weight'] *= side_target / long_sum
         portfolio.loc[portfolio['weight'] < 0, 'weight'] *= side_target / short_sum
+
+        return portfolio
+
+    def _renormalize_to_gross_target(self, portfolio: pd.DataFrame) -> pd.DataFrame:
+        """
+        BT-06: Scale the book to its intended gross size while preserving
+        dollar-neutrality, then log the realized gross/net exposure.
+
+        The desired gross is ``gross_exposure_target * last_risk_scalar`` so that
+        deliberate de-risking (vol-target de-levering, drawdown reduction) is
+        respected, but incidental shrinkage from position caps, the
+        diversification haircut, or the dollar-neutral side rebalance is undone.
+
+        For a dollar-neutral book each side carries half the gross; when a side
+        is missing the book is not tradeable and is returned empty.
+        """
+        portfolio = portfolio.copy()
+
+        if portfolio.empty or 'weight' not in portfolio.columns:
+            self.last_realized_gross = 0.0
+            self.last_realized_net = 0.0
+            return portfolio
+
+        desired_gross = self.gross_exposure_target * self.last_risk_scalar
+
+        long_mask = portfolio['weight'] > 0
+        short_mask = portfolio['weight'] < 0
+        long_sum = portfolio.loc[long_mask, 'weight'].sum()
+        short_sum = portfolio.loc[short_mask, 'weight'].abs().sum()
+
+        if self.balance_long_short:
+            # Dollar-neutral: each side gets half the desired gross.
+            side_target = desired_gross / 2.0
+            if long_sum <= 0 or short_sum <= 0:
+                # One-sided book cannot be made neutral: nothing tradeable.
+                self.last_realized_gross = 0.0
+                self.last_realized_net = 0.0
+                return portfolio.iloc[0:0].copy()
+            portfolio.loc[long_mask, 'weight'] *= side_target / long_sum
+            portfolio.loc[short_mask, 'weight'] *= side_target / short_sum
+        else:
+            current_gross = long_sum + short_sum
+            if current_gross > 0:
+                portfolio['weight'] *= desired_gross / current_gross
+
+        realized_gross = portfolio['weight'].abs().sum()
+        realized_net = portfolio['weight'].sum()
+        self.last_realized_gross = float(realized_gross)
+        self.last_realized_net = float(realized_net)
+        logger.debug(
+            "BT-06 final book: realized gross=%.4f net=%.4f "
+            "(target gross=%.4f, risk_scalar=%.4f, positions=%d)",
+            realized_gross, realized_net, desired_gross,
+            self.last_risk_scalar, len(portfolio),
+        )
 
         return portfolio
 

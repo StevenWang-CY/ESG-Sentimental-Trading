@@ -10,6 +10,9 @@ to all Reddit posts and comments without requiring API credentials.
 API docs: https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md
 """
 
+import logging
+import zlib
+
 import requests
 import pandas as pd
 import numpy as np
@@ -22,10 +25,19 @@ from src.data.reddit_fetcher import (
     compute_esg_relevance,
     compute_engagement_quality,
 )
+from src.utils.provenance import REAL, MOCK, EMPTY, tag
+
+logger = logging.getLogger(__name__)
 
 
 ARCTIC_SHIFT_BASE_URL = "https://arctic-shift.photon-reddit.com"
 ARCTIC_SHIFT_POSTS_SEARCH = f"{ARCTIC_SHIFT_BASE_URL}/api/posts/search"
+
+# Standard output column schema shared by all sentiment/news fetchers.
+STANDARD_COLUMNS = [
+    'timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
+    'sentiment', 'esg_relevance', 'esg_category', 'quality_score',
+]
 
 # Default subreddits matching RedditFetcher priority list
 DEFAULT_SUBREDDITS = [
@@ -152,7 +164,9 @@ class ArcticShiftFetcher:
         }
 
         if not use_mock:
-            # Verify API is reachable
+            # Verify API is reachable. A failed probe is NOT fatal and must NOT
+            # flip the fetcher into mock mode: per-event fetches fail closed on
+            # their own (return EMPTY tagged frames), so we only log here.
             try:
                 resp = self.session.get(
                     ARCTIC_SHIFT_POSTS_SEARCH,
@@ -166,9 +180,13 @@ class ArcticShiftFetcher:
                     print(f"Warning: Arctic Shift API returned status {resp.status_code}")
                     print("  Will attempt requests anyway - API may recover")
             except Exception as e:
-                print(f"Warning: Could not reach Arctic Shift API: {e}")
-                print("  Falling back to mock data mode.")
-                self.use_mock = True
+                # Do NOT fall back to mock data on a production fetch. Log and
+                # continue; per-event fetches return EMPTY when no real data.
+                logger.warning(
+                    "Could not reach Arctic Shift API during init probe: %s. "
+                    "Continuing in real-data mode; per-event fetches will return "
+                    "empty if the API stays unreachable.", e
+                )
 
     def _search_posts(self, query: str, subreddit: str,
                       after: datetime, before: datetime,
@@ -294,7 +312,11 @@ class ArcticShiftFetcher:
               sentiment, esg_relevance, esg_category, quality_score
         """
         if self.use_mock:
-            return self._generate_mock_posts(ticker, event_date, days_before, days_after, max_results)
+            # Intentional demo/test mode: synthetic data, loudly stamped MOCK.
+            mock_df = self._generate_mock_posts(
+                ticker, event_date, days_before, days_after, max_results
+            )
+            return tag(mock_df, MOCK, source='arctic_shift_mock')
 
         start_time = event_date - timedelta(days=days_before)
         end_time = event_date + timedelta(days=days_after)
@@ -545,13 +567,16 @@ class ArcticShiftFetcher:
             if posts_data:
                 print(f"  Found {len(posts_data)} posts via company name '{company_name}'")
 
-        # Return empty DataFrame if nothing found
+        # Return empty DataFrame if nothing found. This is a legitimate SOFT
+        # no-data result for a real fetch (a ticker/event simply had no posts):
+        # return an EMPTY-stamped frame, never fabricated rows.
         if not posts_data:
-            print(f"No posts found for {ticker} around {event_date.date()}")
-            return pd.DataFrame(columns=[
-                'timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
-                'sentiment', 'esg_relevance', 'esg_category', 'quality_score',
-            ])
+            logger.warning(
+                "Arctic Shift: no posts found for %s around %s",
+                ticker, event_date.date()
+            )
+            empty = pd.DataFrame(columns=STANDARD_COLUMNS)
+            return tag(empty, EMPTY, source='arctic_shift')
 
         df = pd.DataFrame(posts_data)
 
@@ -563,8 +588,8 @@ class ArcticShiftFetcher:
         print(f"Fetched {len(df)} posts for {ticker} from {n_subs} subreddits (Arctic Shift)")
         print(f"  ESG-relevant: {esg_count}/{len(df)} | Avg relevance: {avg_relevance:.2f} | Avg sentiment: {avg_sentiment:+.2f}")
 
-        return df[['timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
-                    'sentiment', 'esg_relevance', 'esg_category', 'quality_score']]
+        result = df[STANDARD_COLUMNS]
+        return tag(result, REAL, source='arctic_shift')
 
     def fetch_tweets_batch(self, tickers: List[str], event_dates: Dict[str, datetime],
                            keywords: Optional[List[str]] = None,
@@ -604,8 +629,12 @@ class ArcticShiftFetcher:
     def _generate_mock_posts(self, ticker: str, event_date: datetime,
                              days_before: int = 10, days_after: int = 3,
                              n_posts: int = 100) -> pd.DataFrame:
-        """Generate mock data for testing (identical to RedditFetcher)."""
-        np.random.seed(hash(ticker) % 2**32)
+        """Generate mock data for testing (identical to RedditFetcher).
+
+        Only reachable when use_mock=True. Uses a LOCAL deterministic generator
+        (no global np.random.seed mutation) keyed on the ticker via crc32.
+        """
+        rng = np.random.default_rng(zlib.crc32(str(ticker).encode()))
 
         start_date = event_date - timedelta(days=days_before)
         end_date = event_date + timedelta(days=days_after)
@@ -653,24 +682,24 @@ class ArcticShiftFetcher:
             esg_templates['positive'] * 3
         )
 
-        texts = np.random.choice(all_templates, n_posts)
-        user_karma = np.clip(np.random.pareto(a=1.5, size=n_posts) * 1000, 100, 500000).astype(int)
-        num_comments = np.clip(np.random.poisson(lam=15, size=n_posts), 0, 500)
-        base_score = np.random.poisson(lam=50, size=n_posts)
+        texts = rng.choice(all_templates, n_posts)
+        user_karma = np.clip(rng.pareto(a=1.5, size=n_posts) * 1000, 100, 500000).astype(int)
+        num_comments = np.clip(rng.poisson(lam=15, size=n_posts), 0, 500)
+        base_score = rng.poisson(lam=50, size=n_posts)
         karma_boost = (np.log10(user_karma) / 5).astype(int)
         score = np.clip(base_score + karma_boost + (num_comments * 0.5).astype(int), 1, 10000).astype(int)
 
-        esg_relevance = np.random.uniform(0.5, 1.0, n_posts)
+        esg_relevance = rng.uniform(0.5, 1.0, n_posts)
         categories = ['E'] * 10 + ['S'] * 10 + ['G'] * 10 + ['E'] * 3
-        esg_category = np.random.choice(categories, n_posts)
+        esg_category = rng.choice(categories, n_posts)
 
         sentiment = np.where(
-            np.random.random(n_posts) < 0.7,
-            np.random.uniform(-0.8, -0.2, n_posts),
-            np.random.uniform(0.2, 0.8, n_posts),
+            rng.random(n_posts) < 0.7,
+            rng.uniform(-0.8, -0.2, n_posts),
+            rng.uniform(0.2, 0.8, n_posts),
         )
 
-        quality_score = 0.4 * esg_relevance + 0.3 * np.random.uniform(0.3, 0.8, n_posts) + 0.3 * np.abs(sentiment)
+        quality_score = 0.4 * esg_relevance + 0.3 * rng.uniform(0.3, 0.8, n_posts) + 0.3 * np.abs(sentiment)
 
         return pd.DataFrame({
             'timestamp': timestamps,

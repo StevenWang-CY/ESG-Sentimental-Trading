@@ -209,7 +209,7 @@ portfolio:
   gross_exposure_target: 1.0  # 50% gross long + 50% gross short
   max_position: 0.08  # 8% for concentrated high-conviction positions
   rebalance_frequency: "W"  # Weekly - optimal for ESG event frequency
-  holding_period: 49  # 7 weeks / ~35 trading days: captures full ESG alpha cycle
+  holding_period: 49  # 49 trading days (~10 weeks); captures full ESG alpha cycle
   # Flammer (2013): CARs continue 30-60 trading days post-CSR event
   # Khan, Serafeim & Yoon (2016): material ESG alpha persists quarterly
   # Captures: primary alpha (5-10d) + diffusion (10-20d) + institutional (20-35d)

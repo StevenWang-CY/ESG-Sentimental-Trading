@@ -13,6 +13,9 @@ Limitations:
   - For backtesting, best combined with historical sources (Arctic Shift, GDELT)
 """
 
+import logging
+import zlib
+
 import requests
 import pandas as pd
 import numpy as np
@@ -24,8 +27,17 @@ from src.data.reddit_fetcher import (
     truncate_text_safely,
     compute_esg_relevance,
 )
+from src.utils.provenance import REAL, MOCK, EMPTY, tag
+
+logger = logging.getLogger(__name__)
 
 STOCKTWITS_API = "https://api.stocktwits.com/api/2/streams/symbol"
+
+# Standard output column schema shared by all sentiment/news fetchers.
+STANDARD_COLUMNS = [
+    'timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
+    'sentiment', 'esg_relevance', 'esg_category', 'quality_score',
+]
 
 
 class StockTwitsFetcher:
@@ -77,6 +89,9 @@ class StockTwitsFetcher:
                 pass
 
         if not use_mock:
+            # A non-200/unreachable probe must NOT flip us into mock mode on a
+            # production fetch. Log and continue; per-event fetches fail closed
+            # on their own by returning EMPTY-stamped frames.
             try:
                 test_url = f"{STOCKTWITS_API}/AAPL.json"
                 resp = self.session.get(test_url, timeout=10)
@@ -85,11 +100,18 @@ class StockTwitsFetcher:
                 elif resp.status_code == 429:
                     print("Warning: StockTwits API rate limited, will retry with backoff")
                 else:
-                    print(f"Warning: StockTwits API returned status {resp.status_code}")
-                    self.use_mock = True
+                    logger.warning(
+                        "StockTwits API returned status %s during init probe. "
+                        "Continuing in real-data mode; per-event fetches will "
+                        "return empty if the API stays unavailable.",
+                        resp.status_code
+                    )
             except Exception as e:
-                print(f"Warning: StockTwits API unreachable ({e}), falling back to mock")
-                self.use_mock = True
+                logger.warning(
+                    "StockTwits API unreachable during init probe: %s. Continuing "
+                    "in real-data mode; per-event fetches will return empty if the "
+                    "API stays unreachable.", e
+                )
 
     def _fetch_messages(self, ticker: str, max_id: Optional[int] = None) -> tuple:
         """
@@ -154,7 +176,11 @@ class StockTwitsFetcher:
             DataFrame with columns matching ArcticShiftFetcher output
         """
         if self.use_mock:
-            return self._generate_mock_posts(ticker, event_date, days_before, days_after, max_results)
+            # Intentional demo/test mode: synthetic data, loudly stamped MOCK.
+            mock_df = self._generate_mock_posts(
+                ticker, event_date, days_before, days_after, max_results
+            )
+            return tag(mock_df, MOCK, source='stocktwits_mock')
 
         start_time = event_date - timedelta(days=days_before)
         end_time = event_date + timedelta(days=days_after)
@@ -262,11 +288,16 @@ class StockTwitsFetcher:
             pages_fetched += 1
             time.sleep(1.0)  # Rate limit: ~1 request/second (conservative)
 
+        # SOFT no-data: StockTwits only returns recent messages, so historical
+        # events legitimately yield nothing. Return an EMPTY-stamped frame with
+        # the standard schema; never fabricate.
         if not posts_data:
-            return pd.DataFrame(columns=[
-                'timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
-                'sentiment', 'esg_relevance', 'esg_category', 'quality_score',
-            ])
+            logger.warning(
+                "StockTwits: no messages in date range for %s (API returns recent "
+                "messages only)", ticker
+            )
+            empty = pd.DataFrame(columns=STANDARD_COLUMNS)
+            return tag(empty, EMPTY, source='stocktwits')
 
         df = pd.DataFrame(posts_data)
 
@@ -278,32 +309,36 @@ class StockTwitsFetcher:
         print(f"  StockTwits: {len(df)} messages for ${ticker}")
         print(f"    ESG-relevant: {esg_count}/{len(df)} | Avg sentiment: {avg_sentiment:+.2f} | Bullish: {bullish}, Bearish: {bearish}")
 
-        return df[['timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
-                    'sentiment', 'esg_relevance', 'esg_category', 'quality_score']]
+        result = df[STANDARD_COLUMNS]
+        return tag(result, REAL, source='stocktwits')
 
     def _generate_mock_posts(self, ticker: str, event_date: datetime,
                               days_before: int, days_after: int,
                               max_results: int) -> pd.DataFrame:
-        """Generate mock StockTwits messages for testing."""
-        np.random.seed(hash(f"st_{ticker}_{event_date}") % 2**31)
-        n = min(np.random.randint(3, 15), max_results)
+        """Generate mock StockTwits messages for testing.
+
+        Only reachable when use_mock=True. Uses a LOCAL deterministic generator
+        (no global np.random.seed mutation) keyed on ticker+event via crc32.
+        """
+        rng = np.random.default_rng(zlib.crc32(f"st_{ticker}_{event_date}".encode()))
+        n = min(int(rng.integers(3, 15)), max_results)
 
         data = []
         for i in range(n):
-            offset = np.random.randint(-days_before, days_after + 1)
-            ts = event_date + timedelta(days=offset, hours=np.random.randint(0, 24))
-            sentiment = np.random.uniform(-0.8, 0.8)
+            offset = int(rng.integers(-days_before, days_after + 1))
+            ts = event_date + timedelta(days=offset, hours=int(rng.integers(0, 24)))
+            sentiment = rng.uniform(-0.8, 0.8)
             data.append({
                 'timestamp': ts,
                 'text': f"Mock StockTwits message about ${ticker} ESG event {i}",
                 'user_followers': 1,
                 'retweets': 0,
-                'likes': np.random.randint(0, 30),
+                'likes': int(rng.integers(0, 30)),
                 'ticker': ticker,
                 'sentiment': round(sentiment, 3),
-                'esg_relevance': np.random.uniform(0.1, 0.8),
-                'esg_category': np.random.choice(['E', 'S', 'G']),
-                'quality_score': np.random.uniform(0.2, 0.7),
+                'esg_relevance': rng.uniform(0.1, 0.8),
+                'esg_category': rng.choice(['E', 'S', 'G']),
+                'quality_score': rng.uniform(0.2, 0.7),
             })
 
         return pd.DataFrame(data)

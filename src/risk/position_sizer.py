@@ -164,25 +164,35 @@ class PositionSizer:
 
     def calculate_optimal_leverage(self,
                                   sharpe_ratio: float,
-                                  max_leverage: float = 2.0) -> float:
+                                  max_leverage: float = 2.0,
+                                  target_vol: float = 0.10) -> float:
         """
-        Calculate optimal leverage based on Sharpe ratio
+        Calculate optimal leverage based on Sharpe ratio and target volatility.
 
         Formula: optimal_leverage = Sharpe / (2 * target_vol)
         Typical range: 1.0 to 2.0x
 
+        This is the half-Kelly leverage that targets ``target_vol`` annualized
+        volatility for a strategy whose risk-adjusted edge is ``sharpe_ratio``.
+        With the default 10% target vol, a Sharpe of 1.0 implies leverage of
+        1.0 / (2 * 0.10) = 5.0 before clamping, so the result is bounded by
+        ``max_leverage`` to keep the book within the allowed leverage limit.
+
         Args:
             sharpe_ratio: Strategy Sharpe ratio
-            max_leverage: Maximum allowed leverage
+            max_leverage: Maximum allowed leverage (clamp ceiling)
+            target_vol: Target annualized volatility (e.g., 0.10 = 10%)
 
         Returns:
             Optimal leverage multiplier
         """
-        # Conservative formula: leverage = Sharpe / 2
-        # This assumes target vol of ~10%
-        optimal_lev = sharpe_ratio / 2
+        # Half-Kelly leverage targeting `target_vol`: Sharpe / (2 * target_vol).
+        # Guard against a non-positive target vol.
+        if target_vol <= 0:
+            return 0.5
+        optimal_lev = sharpe_ratio / (2 * target_vol)
 
-        # Cap at maximum
+        # Clamp to the allowed leverage limit (ceiling)
         optimal_lev = min(optimal_lev, max_leverage)
 
         # Minimum of 0.5x (don't go below half capital)

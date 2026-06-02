@@ -17,6 +17,9 @@ REFACTOR (Jan 2026):
   ensures we only proceed when enough sources report back successfully.
 """
 
+import logging
+import zlib
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -29,6 +32,9 @@ from src.data.fetch_coordinator import (
     STANDARD_COLUMNS,
     enforce_schema,
 )
+from src.utils.provenance import REAL, MOCK, EMPTY, tag, DataUnavailableError
+
+logger = logging.getLogger(__name__)
 
 
 class MultiSourceFetcher:
@@ -51,6 +57,7 @@ class MultiSourceFetcher:
                  min_sources: int = 1,
                  max_retries: int = 3,
                  per_source_timeout: float = 120.0,
+                 use_mock: bool = False,
                  **kwargs):
         """
         Initialize multi-source fetcher.
@@ -65,6 +72,10 @@ class MultiSourceFetcher:
             min_sources: Minimum number of sources that must succeed (quorum)
             max_retries: Maximum retry attempts per source on transient failure
             per_source_timeout: Timeout in seconds for a single source
+            use_mock: If True, intentional demo/test mode -- combined data is
+                      synthetic and stamped MOCK. If False (production), the
+                      fetcher fails closed: if no sub-source initializes it raises
+                      DataUnavailableError instead of fabricating data.
         """
         if sources is None:
             sources = ['arctic_shift', 'gdelt', 'stocktwits']
@@ -72,6 +83,14 @@ class MultiSourceFetcher:
         self.sources = sources
         self.min_sources = min_sources
         self.fetchers = {}
+        self.use_mock = use_mock
+        self._coordinator = None
+
+        if use_mock:
+            # Explicit demo/test mode: do not initialize real sub-sources; combined
+            # output is synthetic and stamped MOCK at fetch time.
+            logger.info("[Multi-Source] use_mock=True: serving synthetic combined data (demo mode)")
+            return
 
         # Initialize each source
         if 'arctic_shift' in sources:
@@ -126,20 +145,24 @@ class MultiSourceFetcher:
                 print(f"  [Multi-Source] StockTwits: failed to initialize ({e})")
 
         if not self.fetchers:
-            print("  [Multi-Source] WARNING: No sources initialized, using mock data")
-            self.use_mock = True
-            self._coordinator = None
-        else:
-            self.use_mock = False
-            active = ', '.join(self.fetchers.keys())
-            print(f"  [Multi-Source] Active sources: {active}")
-
-            # Initialize the coordinator with all active fetchers
-            self._coordinator = FetchCoordinator(
-                fetchers=self.fetchers,
-                max_retries=max_retries,
-                per_source_timeout=per_source_timeout,
+            # Production fail-closed: ALL sub-sources failed to initialize. Refuse to
+            # fabricate combined data; raise so the run aborts rather than reporting
+            # synthetic results as real.
+            raise DataUnavailableError(
+                "MultiSourceFetcher(use_mock=False): no sub-source could be initialized "
+                f"from {sources}. Check dependencies/credentials/network for each source, "
+                "or construct with use_mock=True for a demo run."
             )
+
+        active = ', '.join(self.fetchers.keys())
+        logger.info("[Multi-Source] Active sources: %s", active)
+
+        # Initialize the coordinator with all active fetchers
+        self._coordinator = FetchCoordinator(
+            fetchers=self.fetchers,
+            max_retries=max_retries,
+            per_source_timeout=per_source_timeout,
+        )
 
     @property
     def last_coordinated_result(self) -> Optional[CoordinatedResult]:
@@ -171,9 +194,10 @@ class MultiSourceFetcher:
              sentiment, esg_relevance, esg_category, quality_score]
         """
         if self.use_mock:
-            return self._generate_mock_combined(
+            mock_df = self._generate_mock_combined(
                 ticker, event_date, days_before, days_after, max_results
             )
+            return tag(mock_df, MOCK, source='multi_source')
 
         # Coordinated fetch across all sources
         result: CoordinatedResult = self._coordinator.fetch_synchronized(
@@ -193,16 +217,21 @@ class MultiSourceFetcher:
         self._last_source_metrics = self._compute_source_agreement(result)
 
         if not result.quorum_met:
-            print(
-                f"  [Multi-Source] WARNING: Quorum not met for {ticker} "
-                f"(needed {self.min_sources}, got {len(result.successful_sources)}). "
-                f"Failed: {result.failed_sources}"
+            logger.warning(
+                "[Multi-Source] Quorum not met for %s (needed %d, got %d). Failed: %s",
+                ticker, self.min_sources, len(result.successful_sources), result.failed_sources
             )
 
         combined = result.combined_data
 
+        # NOTE: result.combined_data comes from pd.concat inside the coordinator,
+        # which drops df.attrs -- so we must (re-)stamp provenance here explicitly.
         if combined.empty:
-            return pd.DataFrame(columns=STANDARD_COLUMNS)
+            # Real fetch that legitimately returned no rows across all sub-sources.
+            # Stamp EMPTY (not MOCK) so the orchestrator guard can abort the run
+            # rather than backtesting on empty data.
+            empty_df = pd.DataFrame(columns=STANDARD_COLUMNS)
+            return tag(empty_df, EMPTY, source='multi_source')
 
         # Log combined results
         total = len(combined)
@@ -212,10 +241,14 @@ class MultiSourceFetcher:
         for name, sr in result.source_results.items():
             source_parts.append(f"{name}:{sr.row_count}")
         sources_str = ' + '.join(source_parts)
-        print(f"  Multi-Source: {total} total posts ({sources_str}) for {ticker}")
-        print(f"    ESG-relevant: {esg_count}/{total} | Avg sentiment: {avg_sentiment:+.2f}")
+        logger.info("[Multi-Source] %d total posts (%s) for %s", total, sources_str, ticker)
+        logger.info(
+            "[Multi-Source] ESG-relevant: %d/%d | Avg sentiment: %+.2f",
+            esg_count, total, avg_sentiment
+        )
 
-        return combined[STANDARD_COLUMNS]
+        result_df = combined[STANDARD_COLUMNS]
+        return tag(result_df, REAL, source='multi_source')
 
     @property
     def last_source_metrics(self) -> Dict:
@@ -277,28 +310,33 @@ class MultiSourceFetcher:
     def _generate_mock_combined(self, ticker: str, event_date: datetime,
                                  days_before: int, days_after: int,
                                  max_results: int) -> pd.DataFrame:
-        """Generate mock data simulating multiple sources."""
-        np.random.seed(hash(f"multi_{ticker}_{event_date}") % 2**31)
-        n = min(np.random.randint(10, 30), max_results)
+        """Generate mock data simulating multiple sources.
+
+        Only reachable when use_mock=True (explicit demo/test mode).
+        """
+        # Local deterministic RNG keyed on ticker+event (no global np.random.seed
+        # mutation, stable across processes).
+        rng = np.random.default_rng(zlib.crc32(f"multi_{ticker}_{event_date}".encode()))
+        n = min(int(rng.integers(10, 30)), max_results)
 
         sources = ['arctic_shift', 'gdelt', 'stocktwits']
         data = []
         for i in range(n):
-            offset = np.random.randint(-days_before, days_after + 1)
-            ts = event_date + timedelta(days=offset, hours=np.random.randint(0, 24))
-            sentiment = np.random.uniform(-0.8, 0.8)
-            src = np.random.choice(sources)
+            offset = int(rng.integers(-days_before, days_after + 1))
+            ts = event_date + timedelta(days=offset, hours=int(rng.integers(0, 24)))
+            sentiment = float(rng.uniform(-0.8, 0.8))
+            src = rng.choice(sources)
             data.append({
                 'timestamp': ts,
                 'text': f"Mock {src} post about {ticker} ESG event {i}",
                 'user_followers': 1,
                 'retweets': 0,
-                'likes': np.random.randint(0, 100),
+                'likes': int(rng.integers(0, 100)),
                 'ticker': ticker,
                 'sentiment': round(sentiment, 3),
-                'esg_relevance': np.random.uniform(0.1, 0.8),
-                'esg_category': np.random.choice(['E', 'S', 'G']),
-                'quality_score': np.random.uniform(0.3, 0.9),
+                'esg_relevance': float(rng.uniform(0.1, 0.8)),
+                'esg_category': rng.choice(['E', 'S', 'G']),
+                'quality_score': float(rng.uniform(0.3, 0.9)),
             })
 
         return pd.DataFrame(data)

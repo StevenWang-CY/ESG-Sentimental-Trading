@@ -9,10 +9,16 @@ yfinance==0.2.28
 pandas-datareader==0.10.0
 sec-edgar-downloader==5.0.3
 
-# NLP & ML (Optional - install for advanced features)
+# NLP & ML
+# REQUIRED for the DEFAULT production config (nlp.sentiment_analyzer.mode=hybrid,
+# strict=true in config/config.yaml). Without transformers+torch the canonical
+# hybrid FinBERT path fails closed and run_production.py / multi_source cannot run.
+# Install via the packaged extra so versions stay pinned to pyproject.toml:
+#     pip install -e ".[nlp]"
+# (equivalently: pip install transformers==4.30.2 torch==2.0.1)
+# For CPU-only PyTorch, use: torch==2.0.1+cpu
 # transformers==4.30.2
 # torch==2.0.1
-# For CPU-only PyTorch, use: torch==2.0.1+cpu
 
 # Web Scraping & Parsing
 beautifulsoup4==4.12.2

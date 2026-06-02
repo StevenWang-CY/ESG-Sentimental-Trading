@@ -14,11 +14,15 @@ Based on:
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -151,7 +155,7 @@ class DrawdownController:
         if adaptive_config is not None:
             self.drawdown_thresholds = adaptive_config.get_thresholds()
             self.exposure_levels = adaptive_config.get_exposure_levels()
-            print(f"Using adaptive drawdown config:\n{adaptive_config}")
+            logger.debug("Using adaptive drawdown config:\n%s", adaptive_config)
         else:
             # Legacy behavior with defaults
             if drawdown_thresholds is None:
@@ -195,6 +199,37 @@ class DrawdownController:
         return cls(
             lookback_period=lookback_period,
             adaptive_config=adaptive_config,
+        )
+
+    def recalibrate_thresholds(self, historical_returns: pd.Series) -> None:
+        """
+        Refresh ONLY the drawdown thresholds / exposure levels in place from
+        the latest return history, WITHOUT clearing the accumulated
+        ``portfolio_values`` / ``drawdown_history`` state.
+
+        This is the in-place counterpart to :meth:`from_historical_data`, which
+        builds a brand-new controller and therefore wipes the running peak and
+        drawdown accumulation. Use this when adaptive thresholds are desired
+        during a live run: the peak/drawdown tracking must persist so a
+        sustained drawdown actually accumulates and can trigger exposure
+        reduction / a trading halt.
+
+        Args:
+            historical_returns: Historical daily returns for recalibration.
+        """
+        if historical_returns is None or len(historical_returns) < 60:
+            # Not enough data to recalibrate; keep existing thresholds.
+            return
+
+        adaptive_config = AdaptiveDrawdownConfig.from_historical_returns(
+            historical_returns,
+            lookback_days=len(historical_returns),
+        )
+        self.drawdown_thresholds = adaptive_config.get_thresholds()
+        self.exposure_levels = adaptive_config.get_exposure_levels()
+        logger.debug(
+            "Recalibrated drawdown thresholds in place: %s -> exposures %s",
+            self.drawdown_thresholds, self.exposure_levels,
         )
 
     def update(self, portfolio_value: float) -> float:

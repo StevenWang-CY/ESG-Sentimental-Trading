@@ -1,23 +1,31 @@
 """
 Backtest Validation Script
 
-Validates backtest results against root cause analysis criteria.
-Implements the validation checklist from BACKTEST_ANALYSIS_ROOT_CAUSE.md
+Validates backtest results against the canonical strategy runtime contract.
 
-Pre-Flight Checks:
-- Universe size (50-90 stocks for MEDIUM/ALL)
-- Confidence threshold (≥0.18)
+The producer of truth is the canonical FLAT run JSON written by
+``run_production.py`` to ``results/runs/run_{start}_{end}_{githash}.json``.
+That file is a flat metrics dict (NOT the nested PerformanceAnalyzer tear
+sheet), so this validator reads the flat keys directly. Critical units:
+
+* ``max_drawdown_pct`` -- percent, negative (used for percent thresholds)
+* ``total_return_pct`` -- percent (used for return thresholds)
+* ``turnover``         -- annualized turnover (read directly)
+* ``sharpe_ratio`` / ``sortino_ratio`` -- read directly
+
+Pre-Flight Checks (canonical params, sourced from strategy_config where
+available):
+- Universe size (40-100 stocks)
+- Confidence threshold (>= 0.25)
 - Rebalance frequency (Weekly for ESG)
-- Holding period (7-10 days)
-- Reddit window (3 days before, 7 days after)
+- Holding period (up to 49 days)
+- Social window (10 days before, 3 days after)
 
 Post-Backtest Validation:
 - Sharpe ratio (>0.50, ideally >0.60)
 - Sortino/Sharpe ratio (1.5x-2.0x)
-- Turnover (3x-5x optimal, <6x max)
-- Max drawdown (<10%, 15% max acceptable)
-- Sentiment-quintile correlation (>0.75)
-- ESG category balance (G: 60-70%, E+S: 30-40%)
+- Turnover (annualized; ceiling consistent with weekly long/short book)
+- Max drawdown (percent, negative)
 """
 
 import argparse
@@ -25,7 +33,7 @@ import yaml
 import pandas as pd
 import logging
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import json
 from dataclasses import dataclass, asdict
 
@@ -36,28 +44,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Default location of the canonical FLAT run JSON written by run_production.py.
+RUNS_DIR = Path('results/runs')
+
 
 @dataclass
 class ValidationCriteria:
-    """Validation criteria from root cause analysis"""
+    """Validation criteria for the canonical strategy runtime contract.
 
-    # Pre-flight checks
+    Pre-flight literals default to the canonical strategy spec (confidence
+    0.25, holding period up to 49 days, social window 10 before / 3 after).
+    Use :meth:`from_strategy_spec` to derive these from a loaded config so the
+    validator never drifts from ``src.utils.strategy_config``.
+    """
+
+    # Pre-flight checks (canonical)
     min_universe_size: int = 40
     max_universe_size: int = 100
-    min_confidence_threshold: float = 0.18
+    min_confidence_threshold: float = 0.25
     rebalance_frequency: str = "W"
     min_holding_period: int = 7
-    max_holding_period: int = 10
-    reddit_days_before: int = 3
-    reddit_days_after: int = 7
+    max_holding_period: int = 49
+    reddit_days_before: int = 10
+    reddit_days_after: int = 3
 
     # Post-backtest validation
     min_sharpe: float = 0.50
     target_sharpe: float = 0.60
     min_sortino_sharpe_ratio: float = 1.5
     target_sortino_sharpe_ratio: float = 2.0
-    min_turnover: float = 3.0
-    max_turnover: float = 6.0
+    # Turnover is now ANNUALIZED (sum of per-rebalance book turnover over a
+    # year). A weekly-rebalanced dollar-neutral long/short book can turn over a
+    # large fraction of the book each of ~52 rebalances, so the annualized
+    # ceiling is far higher than the legacy per-period 6x. < min => signals are
+    # under-utilized; > max => excessive trading / cost drag.
+    min_turnover: float = 2.0
+    max_turnover: float = 52.0
     max_drawdown_warning: float = -10.0
     max_drawdown_critical: float = -15.0
     min_sentiment_quintile_corr: float = 0.75
@@ -65,6 +87,30 @@ class ValidationCriteria:
     max_governance_pct: float = 70.0
     min_env_social_pct: float = 30.0
     max_env_social_pct: float = 40.0
+
+    @classmethod
+    def from_strategy_spec(cls, config: Dict) -> "ValidationCriteria":
+        """Build criteria from a loaded config via the canonical strategy spec.
+
+        Falls back to the canonical literal defaults if the spec cannot be
+        loaded so the validator stays importable and usable without the spec.
+        """
+        criteria = cls()
+        try:
+            from src.utils.strategy_config import load_strategy_spec
+
+            spec = load_strategy_spec(config)
+            criteria.min_confidence_threshold = float(spec.event_confidence_threshold)
+            criteria.rebalance_frequency = str(spec.portfolio.rebalance_frequency)
+            criteria.max_holding_period = int(spec.portfolio.holding_period)
+            criteria.reddit_days_before = int(spec.social_window.days_before_event)
+            criteria.reddit_days_after = int(spec.social_window.days_after_event)
+        except Exception as e:  # pragma: no cover - defensive fallback
+            logger.warning(
+                "Could not derive criteria from strategy_config (%s); "
+                "using canonical literal defaults.", e
+            )
+        return criteria
 
 
 class BacktestValidator:
@@ -81,11 +127,14 @@ class BacktestValidator:
             criteria: ValidationCriteria object (uses defaults if None)
         """
         self.config_path = config_path
-        self.criteria = criteria or ValidationCriteria()
 
         # Load config
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
+
+        # Derive canonical criteria from the loaded config (strategy_config)
+        # unless the caller supplied an explicit ValidationCriteria.
+        self.criteria = criteria or ValidationCriteria.from_strategy_spec(self.config)
 
         self.pre_flight_results = {}
         self.post_backtest_results = {}
@@ -190,14 +239,54 @@ class BacktestValidator:
         passed = len(self.errors) == 0
         return passed, issues
 
+    @staticmethod
+    def _drawdown_pct(results_dict) -> Optional[float]:
+        """Read max drawdown as a PERCENT (negative).
+
+        The canonical FLAT run JSON carries ``max_drawdown_pct`` (percent,
+        negative) and ``max_drawdown`` (fraction, negative). Prefer the percent
+        key; if only the fraction is present, scale it to percent. The
+        dashboard log-parsing path already stores a percent value under
+        ``max_drawdown`` -- a value already in the percent range (|x| > 1) is
+        treated as percent and passed through unchanged.
+        """
+        if results_dict.get('max_drawdown_pct') is not None:
+            return float(results_dict['max_drawdown_pct'])
+        raw = results_dict.get('max_drawdown')
+        if raw is None:
+            return None
+        raw = float(raw)
+        # A genuine drawdown fraction is in (-1, 0]; anything outside is already
+        # expressed in percent.
+        return raw if abs(raw) > 1.0 else raw * 100.0
+
+    @staticmethod
+    def _total_return_pct(results_dict) -> Optional[float]:
+        """Read total return as a PERCENT.
+
+        Prefer the canonical ``total_return_pct``; if only the fraction
+        ``total_return`` is present, scale to percent. A bare value already in
+        the percent range (|x| > 1) is treated as percent.
+        """
+        if results_dict.get('total_return_pct') is not None:
+            return float(results_dict['total_return_pct'])
+        raw = results_dict.get('total_return')
+        if raw is None:
+            return None
+        raw = float(raw)
+        return raw if abs(raw) > 1.0 else raw * 100.0
+
     def validate_backtest_results(self, results_dict) -> Tuple[bool, List[str]]:
         """
-        Validate backtest performance results
+        Validate backtest performance results against the canonical FLAT dict.
 
         Args:
-            results_dict: Dictionary containing backtest metrics
-                Expected keys: sharpe_ratio, sortino_ratio, turnover,
-                              max_drawdown, total_return, num_trades
+            results_dict: Flat metrics dict as written to
+                ``results/runs/run_*.json`` by ``run_production.py``. Read keys:
+                sharpe_ratio, sortino_ratio (direct), turnover (annualized,
+                direct), max_drawdown_pct (percent, negative),
+                total_return_pct (percent), num_trades. Fraction-only inputs are
+                tolerated and scaled to percent for the percent thresholds.
 
         Returns:
             Tuple of (passed, list of issues)
@@ -208,7 +297,7 @@ class BacktestValidator:
 
         issues = []
 
-        # Check 1: Sharpe Ratio
+        # Check 1: Sharpe Ratio (read directly)
         sharpe = results_dict.get('sharpe_ratio')
         if sharpe is not None:
             if sharpe < self.criteria.min_sharpe:
@@ -261,8 +350,8 @@ class BacktestValidator:
                 logger.info(f"✓ Turnover: {turnover:.2f}x (OK)")
                 self.post_backtest_results['turnover'] = 'PASS'
 
-        # Check 4: Max Drawdown
-        max_dd = results_dict.get('max_drawdown')
+        # Check 4: Max Drawdown (percent, negative)
+        max_dd = self._drawdown_pct(results_dict)
         if max_dd is not None:
             if max_dd < self.criteria.max_drawdown_critical:
                 msg = f"❌ Max drawdown {max_dd:.2f}% < {self.criteria.max_drawdown_critical}% (UNACCEPTABLE risk)"
@@ -283,8 +372,8 @@ class BacktestValidator:
         if num_trades is not None:
             logger.info(f"ℹ️  Number of trades: {num_trades}")
 
-        # Check 6: Total Return
-        total_return = results_dict.get('total_return')
+        # Check 6: Total Return (percent)
+        total_return = self._total_return_pct(results_dict)
         if total_return is not None:
             logger.info(f"ℹ️  Total return: {total_return:.2f}%")
 
@@ -367,41 +456,97 @@ class BacktestValidator:
         return report_text
 
 
-def parse_backtest_log(log_file):
+def find_latest_run_json(runs_dir: Path = RUNS_DIR) -> Optional[Path]:
+    """Return the newest ``run_*.json`` under ``runs_dir`` (by mtime), or None."""
+    runs_dir = Path(runs_dir)
+    if not runs_dir.exists():
+        return None
+    candidates = sorted(
+        runs_dir.glob('run_*.json'),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def load_run_json(results_file: Path) -> Dict:
+    """Load the canonical FLAT run JSON written by run_production.py."""
+    with open(results_file, 'r') as f:
+        return json.load(f)
+
+
+def parse_tear_sheet(tearsheet_file) -> Dict:
+    """Parse a metrics.py tear sheet (.txt) into the FLAT metrics dict.
+
+    metrics.py ``save_tear_sheet`` writes left-justified ``snake_case`` keys
+    (``f"{key:30s}: {value}"``), so anchor on EXACT snake_case key equality
+    (``line.split(':')[0].strip() == 'sharpe_ratio'``) rather than the
+    Title-Case labels no producer emits. Ratios are plain floats; risk metrics
+    (``max_drawdown``) and returns (``total_return``) are written as percent via
+    ``{value:10.2%}`` (e.g. ``-15.00%``) and the trailing ``%`` is stripped.
     """
-    Parse backtest results from log file
-
-    Args:
-        log_file: Path to backtest log file
-
-    Returns:
-        dict: Parsed metrics
-    """
-    results = {}
-
+    results: Dict = {}
+    # Map of tear-sheet snake_case key -> (flat key, transform)
+    ratio_keys = {'sharpe_ratio', 'sortino_ratio', 'calmar_ratio'}
     try:
-        with open(log_file, 'r') as f:
+        with open(tearsheet_file, 'r') as f:
             content = f.read()
 
-        # Extract metrics (same parsing logic as threshold_sweep.py)
         for line in content.split('\n'):
-            if 'Sharpe Ratio:' in line:
-                results['sharpe_ratio'] = float(line.split(':')[1].strip())
-            elif 'Sortino Ratio:' in line:
-                results['sortino_ratio'] = float(line.split(':')[1].strip())
-            elif 'Turnover:' in line:
-                results['turnover'] = float(line.split(':')[1].strip().replace('x', ''))
-            elif 'Max Drawdown:' in line:
-                results['max_drawdown'] = float(line.split(':')[1].strip().replace('%', ''))
-            elif 'Total Return:' in line:
-                results['total_return'] = float(line.split(':')[1].strip().replace('%', ''))
-            elif 'Total Trades:' in line or 'Number of Trades:' in line:
-                results['num_trades'] = int(line.split(':')[1].strip())
+            if ':' not in line:
+                continue
+            key = line.split(':')[0].strip()
+            value = line.split(':', 1)[1].strip()
+
+            try:
+                if key in ratio_keys:
+                    results[key] = float(value)
+                elif key == 'turnover':
+                    # Trading metric: plain number (may carry a trailing 'x')
+                    results['turnover'] = float(value.replace('x', '').replace(',', ''))
+                elif key == 'num_trades':
+                    results['num_trades'] = int(float(value.replace(',', '')))
+                elif key == 'max_drawdown':
+                    # percent-formatted fraction, e.g. '-15.00%'
+                    results['max_drawdown_pct'] = float(value.replace('%', '').replace(',', ''))
+                elif key == 'total_return':
+                    results['total_return_pct'] = float(value.replace('%', '').replace(',', ''))
+            except ValueError:
+                continue
 
     except Exception as e:
-        logger.error(f"Error parsing log file: {str(e)}")
+        logger.error(f"Error parsing tear sheet {tearsheet_file}: {str(e)}")
 
     return results
+
+
+def load_results(results_file: Optional[str]) -> Dict:
+    """Load backtest metrics, preferring the canonical FLAT run JSON.
+
+    Resolution order:
+      1. ``results_file`` ending in ``.json``  -> canonical FLAT run JSON.
+      2. ``results_file`` ending in ``.txt``   -> parse metrics.py tear sheet.
+      3. ``results_file`` is None              -> newest ``results/runs/*.json``.
+    """
+    if results_file:
+        path = Path(results_file)
+        if path.suffix == '.json':
+            logger.info(f"Loading canonical run JSON: {path}")
+            return load_run_json(path)
+        if path.suffix == '.txt':
+            logger.info(f"Parsing tear sheet: {path}")
+            return parse_tear_sheet(path)
+        logger.warning(f"Unrecognized results file extension: {path.suffix}")
+        return {}
+
+    latest = find_latest_run_json()
+    if latest is None:
+        logger.warning(
+            "No --results-file given and no results/runs/run_*.json found."
+        )
+        return {}
+    logger.info(f"Using newest canonical run JSON: {latest}")
+    return load_run_json(latest)
 
 
 def main():
@@ -414,7 +559,10 @@ def main():
     parser.add_argument('--universe-size', type=int,
                        help='Universe size (number of stocks)')
     parser.add_argument('--results-file', type=str,
-                       help='Path to backtest results (log file or JSON)')
+                       help='Path to backtest results: canonical run JSON '
+                            '(results/runs/run_*.json) or a metrics.py tear '
+                            'sheet .txt. If omitted, the newest '
+                            'results/runs/run_*.json is used.')
     parser.add_argument('--output-report', type=str,
                        help='Path to save validation report')
     parser.add_argument('--pre-flight-only', action='store_true',
@@ -430,20 +578,15 @@ def main():
         universe_size=args.universe_size
     )
 
-    # Run post-backtest validation if results provided
-    if args.results_file and not args.pre_flight_only:
-        # Parse results
-        if args.results_file.endswith('.json'):
-            with open(args.results_file, 'r') as f:
-                results = json.load(f)
-        else:
-            # Assume log file
-            results = parse_backtest_log(args.results_file)
+    # Run post-backtest validation unless pre-flight-only. When no explicit
+    # --results-file is given, fall back to the newest canonical run JSON.
+    if not args.pre_flight_only:
+        results = load_results(args.results_file)
 
         if results:
             post_backtest_passed, post_backtest_issues = validator.validate_backtest_results(results)
         else:
-            logger.warning("Could not parse results from file")
+            logger.warning("No backtest results available to validate.")
             post_backtest_passed = None
     else:
         post_backtest_passed = None

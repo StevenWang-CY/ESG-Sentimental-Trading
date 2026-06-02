@@ -12,13 +12,19 @@ AUDIT FIX (Jan 2026):
 - Added proper word-boundary truncation for FinBERT compatibility
 """
 
-import os
+import logging
+import zlib
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 import time
 import re
+
+from src.utils.provenance import REAL, MOCK, EMPTY, tag, DataUnavailableError
+from src.utils.config_loader import resolve_credential, is_unset
+
+logger = logging.getLogger(__name__)
 
 
 def truncate_text_safely(text: str, max_chars: int = 500) -> str:
@@ -98,26 +104,6 @@ ESG_KEYWORDS = {
         ]
     }
 }
-
-
-def _load_credential(value: Optional[str], env_var: str) -> Optional[str]:
-    """
-    Load credential from value or environment variable.
-
-    If value is None, empty, or looks like a placeholder (contains ${...}),
-    try to load from environment variable instead.
-
-    Args:
-        value: Value from config file
-        env_var: Name of environment variable to check
-
-    Returns:
-        Credential value or None
-    """
-    if value and not value.startswith('${'):
-        return value
-    # Load from environment variable
-    return os.environ.get(env_var)
 
 
 def compute_esg_relevance(text: str, ticker: str = None) -> Tuple[float, str, List[str]]:
@@ -251,9 +237,11 @@ class RedditFetcher:
             enable_sentiment: If True, use FinBERT for sentiment scoring
             min_relevance_score: Minimum ESG relevance to include post (0.0-1.0)
         """
-        # Load credentials from environment variables if not provided or if placeholders
-        self.client_id = _load_credential(client_id, 'REDDIT_CLIENT_ID')
-        self.client_secret = _load_credential(client_secret, 'REDDIT_CLIENT_SECRET')
+        # Load credentials from environment variables if not provided or if placeholders.
+        # resolve_credential treats ${...} placeholders and empty values as unset and
+        # falls back to the named env var, so both .env and process env work.
+        self.client_id = resolve_credential(client_id, 'REDDIT_CLIENT_ID')
+        self.client_secret = resolve_credential(client_secret, 'REDDIT_CLIENT_SECRET')
         self.user_agent = user_agent or "ESG Sentiment Trading Bot 1.0"
         self.use_mock = use_mock
         self.reddit = None
@@ -362,32 +350,49 @@ class RedditFetcher:
             'greeninvestor'
         ]
 
-        if not use_mock and client_id and client_secret:
-            try:
-                import praw
-                # OPTIMIZATION: Reduce timeout from default 16s to 8s for faster failure recovery
-                self.reddit = praw.Reddit(
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    user_agent=self.user_agent,
-                    timeout=8  # Reduced from default 16s - fail fast and retry
-                )
-                print("Reddit API client initialized successfully (8s timeout).")
-                # Test connection
-                self.reddit.user.me()
-                print(f"Connected to Reddit. Monitoring subreddits: {', '.join(self.esg_subreddits[:4])}")
-            except ImportError:
-                print("Warning: praw not installed. Install with: pip install praw")
-                print("Falling back to mock data mode.")
-                self.use_mock = True
-            except Exception as e:
-                print(f"Warning: Failed to initialize Reddit client: {e}")
-                print("Falling back to mock data mode.")
-                self.use_mock = True
-        else:
-            if not use_mock:
-                print("Warning: No Reddit API credentials provided. Using mock data.")
-            self.use_mock = True
+        if use_mock:
+            # Explicit demo/test mode: caller opted in to synthetic data.
+            return
+
+        # Production mode (use_mock=False): fail closed rather than fabricating data.
+        # 1. Credentials must be present.
+        if is_unset(self.client_id) or is_unset(self.client_secret):
+            raise DataUnavailableError(
+                "RedditFetcher(use_mock=False) requires real Reddit API credentials. "
+                "Set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in your environment or .env "
+                "(or pass client_id/client_secret), or construct with use_mock=True for a demo run."
+            )
+
+        # 2. The praw client must initialize and connect. If not, we cannot fetch
+        #    real data -- raise instead of silently switching to mock.
+        try:
+            import praw
+        except ImportError as e:
+            raise DataUnavailableError(
+                "RedditFetcher(use_mock=False) requires the 'praw' package. "
+                "Install it with: pip install praw"
+            ) from e
+
+        try:
+            # OPTIMIZATION: Reduce timeout from default 16s to 8s for faster failure recovery
+            self.reddit = praw.Reddit(
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                user_agent=self.user_agent,
+                timeout=8  # Reduced from default 16s - fail fast and retry
+            )
+            # Test connection
+            self.reddit.user.me()
+            logger.info(
+                "Reddit API client initialized and connected (8s timeout). "
+                "Monitoring subreddits: %s", ', '.join(self.esg_subreddits[:4])
+            )
+        except Exception as e:
+            self.reddit = None
+            raise DataUnavailableError(
+                f"RedditFetcher(use_mock=False): failed to initialize/connect the Reddit "
+                f"client: {e}. Check credentials and network; refusing to fall back to mock data."
+            ) from e
 
     def _compute_post_quality(self, text: str, ticker: str, score: int,
                                num_comments: int, author_karma: int) -> Dict:
@@ -488,7 +493,8 @@ class RedditFetcher:
             - quality_score: Combined quality score (0.0-1.0)
         """
         if self.use_mock:
-            return self._generate_mock_posts(ticker, event_date, days_before, days_after, max_results)
+            mock_df = self._generate_mock_posts(ticker, event_date, days_before, days_after, max_results)
+            return tag(mock_df, MOCK, source='reddit')
 
         # Build search query
         query = self._build_search_query(ticker, keywords)
@@ -664,11 +670,12 @@ class RedditFetcher:
                     print(f"  ✓ Found {len(posts_data)} posts via company name '{company_name}'")
 
             if not posts_data:
-                print(f"No Reddit posts found for {ticker} around {event_date}")
-                return pd.DataFrame(columns=[
+                logger.warning("No Reddit posts found for %s around %s", ticker, event_date)
+                empty_df = pd.DataFrame(columns=[
                     'timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
                     'sentiment', 'esg_relevance', 'esg_category', 'quality_score'
                 ])
+                return tag(empty_df, EMPTY, source='reddit')
 
             df = pd.DataFrame(posts_data)
 
@@ -679,13 +686,23 @@ class RedditFetcher:
             print(f"Fetched {len(df)} Reddit posts for {ticker} from {len(df['subreddit'].unique())} subreddits")
             print(f"  → ESG-relevant: {esg_count}/{len(df)} | Avg relevance: {avg_relevance:.2f} | Avg sentiment: {avg_sentiment:+.2f}")
 
-            return df[['timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
-                       'sentiment', 'esg_relevance', 'esg_category', 'quality_score']]
+            result = df[['timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
+                         'sentiment', 'esg_relevance', 'esg_category', 'quality_score']]
+            return tag(result, REAL, source='reddit')
 
         except Exception as e:
-            print(f"Error fetching Reddit posts: {e}")
-            print("Falling back to mock data.")
-            return self._generate_mock_posts(ticker, event_date, days_before, days_after, max_results)
+            # SOFT no-data: a per-event fetch failure must NOT fabricate rows on a
+            # production run. Return an EMPTY tagged frame and warn so the caller can
+            # skip this event; the orchestrator guard handles aborting if needed.
+            logger.warning(
+                "Error fetching Reddit posts for %s around %s: %s. "
+                "Returning empty result (no mock fallback).", ticker, event_date, e
+            )
+            empty_df = pd.DataFrame(columns=[
+                'timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
+                'sentiment', 'esg_relevance', 'esg_category', 'quality_score'
+            ])
+            return tag(empty_df, EMPTY, source='reddit')
 
     def fetch_tweets_batch(self, tickers: List[str], event_dates: Dict[str, datetime],
                             keywords: Optional[List[str]] = None,
@@ -773,7 +790,9 @@ class RedditFetcher:
         Returns:
             DataFrame with mock post data
         """
-        np.random.seed(hash(ticker) % 2**32)
+        # Local deterministic RNG keyed on ticker (no global np.random.seed mutation,
+        # stable across processes). Only reachable when use_mock=True.
+        rng = np.random.default_rng(zlib.crc32(str(ticker).encode()))
 
         # Generate timestamps with more activity post-event
         start_date = event_date - timedelta(days=days_before)
@@ -825,41 +844,41 @@ class RedditFetcher:
             esg_templates['positive'] * 3
         )
 
-        texts = np.random.choice(all_templates, n_posts)
+        texts = rng.choice(all_templates, n_posts)
 
         # Generate realistic engagement metrics (Reddit-style)
         # Karma: power-law distribution (most users have low karma, some have very high)
-        user_karma = np.random.pareto(a=1.5, size=n_posts) * 1000
+        user_karma = rng.pareto(a=1.5, size=n_posts) * 1000
         user_karma = np.clip(user_karma, 100, 500000).astype(int)
 
         # Comments: Poisson distribution
-        num_comments = np.random.poisson(lam=15, size=n_posts)
+        num_comments = rng.poisson(lam=15, size=n_posts)
         num_comments = np.clip(num_comments, 0, 500)
 
         # Score (upvotes): correlation with karma and comments
-        base_score = np.random.poisson(lam=50, size=n_posts)
+        base_score = rng.poisson(lam=50, size=n_posts)
         karma_boost = (np.log10(user_karma) / 5).astype(int)
         score = base_score + karma_boost + (num_comments * 0.5).astype(int)
         score = np.clip(score, 1, 10000).astype(int)
 
         # v3.4: Generate semantic and sentiment scores for mock data
         # ESG relevance: all mock posts are ESG-related by design
-        esg_relevance = np.random.uniform(0.5, 1.0, n_posts)
+        esg_relevance = rng.uniform(0.5, 1.0, n_posts)
 
         # ESG category based on template distribution (E:S:G:positive = 10:10:10:3)
         categories = (['E'] * 10 + ['S'] * 10 + ['G'] * 10 + ['E'] * 3)  # Positive → E
-        esg_category = np.random.choice(categories, n_posts)
+        esg_category = rng.choice(categories, n_posts)
 
         # Sentiment: mix of negative (ESG events) and positive
         # 70% negative (ESG concerns), 30% positive
         sentiment = np.where(
-            np.random.random(n_posts) < 0.7,
-            np.random.uniform(-0.8, -0.2, n_posts),  # Negative sentiment
-            np.random.uniform(0.2, 0.8, n_posts)     # Positive sentiment
+            rng.random(n_posts) < 0.7,
+            rng.uniform(-0.8, -0.2, n_posts),  # Negative sentiment
+            rng.uniform(0.2, 0.8, n_posts)     # Positive sentiment
         )
 
         # Quality score: combination of relevance, engagement, and sentiment strength
-        quality_score = 0.4 * esg_relevance + 0.3 * np.random.uniform(0.3, 0.8, n_posts) + 0.3 * np.abs(sentiment)
+        quality_score = 0.4 * esg_relevance + 0.3 * rng.uniform(0.3, 0.8, n_posts) + 0.3 * np.abs(sentiment)
 
         # Create DataFrame with v3.4 columns
         mock_data = pd.DataFrame({
