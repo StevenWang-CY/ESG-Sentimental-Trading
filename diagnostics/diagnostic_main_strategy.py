@@ -3,7 +3,8 @@ Diagnostic for main strategy returns distribution
 """
 import sys
 from pathlib import Path
-sys.path.append(str(Path(__file__).parent / 'src'))
+# Add repo root (one level up from diagnostics/) so the 'src' package resolves
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 import numpy as np
@@ -14,8 +15,8 @@ from datetime import datetime
 logging.basicConfig(level=logging.ERROR)
 
 # Import after path setup
-from backtest import BacktestEngine
-from signals.portfolio_constructor import PortfolioConstructor
+from src.backtest import BacktestEngine
+from src.signals.portfolio_constructor import PortfolioConstructor
 
 def diagnose_main_strategy():
     """Diagnose main strategy returns"""

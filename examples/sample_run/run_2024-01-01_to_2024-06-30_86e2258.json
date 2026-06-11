@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "run_id": "run_2024-01-01_to_2024-06-30_86e2258",
+  "generated_at": "2026-06-02T17:09:53",
+  "status": "VALIDATION_FAILED",
+  "git_commit": "86e2258",
+  "cli_args": {
+    "config": "config/config.yaml",
+    "start_date": "2024-01-01",
+    "end_date": "2024-06-30",
+    "universe": "custom",
+    "esg_sensitivity": "HIGH",
+    "tickers": [
+      "AAPL",
+      "MSFT",
+      "TSLA",
+      "XOM",
+      "JPM",
+      "NKE",
+      "SBUX",
+      "CVX",
+      "KO",
+      "PEP",
+      "NEE",
+      "DUK"
+    ],
+    "max_tickers": null,
+    "save_data": false,
+    "use_cache": true,
+    "force_refresh": true,
+    "clear_cache": false,
+    "force_real_social_media": false,
+    "social_source": null,
+    "allow_mock": true,
+    "seed": 42
+  },
+  "seed": 42,
+  "allow_mock": true,
+  "universe": "custom",
+  "start_date": "2024-01-01",
+  "end_date": "2024-06-30",
+  "social_source": "multi_source",
+  "data_provenance": {
+    "prices": "mock",
+    "factors": "mock",
+    "social_source": "multi_source",
+    "n_events": 36,
+    "n_signals": 32,
+    "n_positions": 74
+  },
+  "metrics": {
+    "sharpe_ratio": -0.764874629004716,
+    "sharpe_ratio_lo_adjusted": -0.9410250956180248,
+    "probabilistic_sharpe": 0.26421680961806604,
+    "deflated_sharpe": 0.26421680961806604,
+    "sortino_ratio": -1.0500830390863507,
+    "annualized_return": -0.07510734863884694,
+    "annualized_return_pct": -7.510734863884694,
+    "cagr": -0.07510734863884694,
+    "total_return": -0.051602185409344616,
+    "total_return_pct": -5.160218540934461,
+    "volatility": 0.1189968166002675,
+    "volatility_pct": 11.899681660026749,
+    "max_drawdown": -0.09424075334942728,
+    "max_drawdown_pct": -9.424075334942728,
+    "calmar_ratio": -0.7969731349702054,
+    "turnover": 4.234823927819453,
+    "num_trades": 14,
+    "win_rate": 0.0
+  },
+  "factor": {
+    "alpha_annual": -0.08248456981630843,
+    "alpha_tstat": -0.6180069732121088,
+    "alpha_pvalue": 0.5365707419998114,
+    "betas": {
+      "Mkt-RF": -0.06096181033751946,
+      "SMB": -0.167292622585544,
+      "HML": -0.060564361904627224,
+      "RMW": 0.09481794529343684,
+      "CMA": -0.08136909494985287,
+      "Mom": -0.0649156981813598
+    },
+    "r_squared": 0.02424248849388211,
+    "cov_type": "HAC (Newey-West, lags=4)",
+    "nw_lags": 4,
+    "n_observations": 171,
+    "factors_provenance": "mock"
+  },
+  "factor_status": "COMPLETE",
+  "portfolio_stats": {
+    "n_positions": 74.0,
+    "n_long": 37.0,
+    "n_short": 37.0,
+    "total_long_weight": 0.4999999999999998,
+    "total_short_weight": -0.4999999999999998,
+    "net_exposure": 6.938893903907228e-18,
+    "gross_exposure": 0.9999999999999999,
+    "avg_position_size": 0.013513513513513513
+  },
+  "validation": {
+    "passed": false,
+    "issues": [
+      "\u274c Universe size 12 < 40 (TOO SMALL, concentration risk)",
+      "\u274c Sharpe ratio -0.765 < 0.5 (STRATEGY FAILED)",
+      "\u274c Sortino/Sharpe 0.00x < 1.5x (POOR downside protection)"
+    ]
+  },
+  "paths": {
+    "signals_csv": "data/signals_2024-01-01_to_2024-06-30.csv",
+    "portfolio_csv": "data/portfolio_2024-01-01_to_2024-06-30.csv",
+    "equity_csv": "data/equity_2024-01-01_to_2024-06-30.csv",
+    "tearsheet_txt": "results/tear_sheets/tearsheet_2024-01-01_to_2024-06-30.txt"
+  }
+}

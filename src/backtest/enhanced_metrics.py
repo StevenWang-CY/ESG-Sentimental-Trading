@@ -73,13 +73,18 @@ class EnhancedPerformanceAnalyzer:
         periods_per_year = 252
 
         cagr = self._calculate_cagr()
-        annualized_return = self.returns.mean() * periods_per_year
+        # BT-04: annualized_return is CAGR (geometric compounding), consistent
+        # with PerformanceAnalyzer. The arithmetic figure (mean * periods) is
+        # retained separately as annualized_return_arithmetic for reference.
+        annualized_return = cagr
+        annualized_return_arithmetic = self.returns.mean() * periods_per_year
         annualized_vol = self.returns.std() * np.sqrt(periods_per_year)
 
         return {
             'total_return': total_return,
             'cagr': cagr,
             'annualized_return': annualized_return,
+            'annualized_return_arithmetic': annualized_return_arithmetic,
             'annualized_volatility': annualized_vol,
             'sharpe_ratio': self._calculate_sharpe_ratio(),
             'sortino_ratio': self._calculate_sortino_ratio(),

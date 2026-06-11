@@ -3,17 +3,23 @@ Fama-French Factor Data
 Downloads and manages Fama-French factor data from Ken French's data library
 """
 
+import logging
+
 import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import Optional
+
+from src.utils.provenance import REAL, MOCK, tag, DataUnavailableError
+
+logger = logging.getLogger(__name__)
 
 try:
     import pandas_datareader as pdr
     DATAREADER_AVAILABLE = True
 except ImportError:
     DATAREADER_AVAILABLE = False
-    print("Warning: pandas_datareader not available. Install with: pip install pandas-datareader")
+    logger.warning("pandas_datareader not available. Install with: pip install pandas-datareader")
 
 
 class FamaFrenchFactors:
@@ -21,14 +27,20 @@ class FamaFrenchFactors:
     Downloads and manages Fama-French factor data
     """
 
-    def __init__(self, data_folder: str = "./data/processed/factors"):
+    def __init__(self, data_folder: str = "./data/processed/factors",
+                 use_mock: bool = False):
         """
         Initialize Fama-French factor loader
 
         Args:
             data_folder: Where to cache factor data
+            use_mock: When True, intentionally return synthetic (demo/test)
+                factor data stamped MOCK. When False (production default),
+                a download/dependency failure raises DataUnavailableError
+                instead of silently fabricating data.
         """
         self.data_folder = data_folder
+        self.use_mock = use_mock
         self.factors = None
 
     def load_ff_factors(self, start_date: str, end_date: str,
@@ -44,9 +56,18 @@ class FamaFrenchFactors:
         Returns:
             DataFrame with factors: Mkt-RF, SMB, HML, RMW, CMA, Mom, RF
         """
+        if self.use_mock:
+            logger.warning("use_mock=True: generating SYNTHETIC mock factor data (demo mode).")
+            mock_df = self._generate_mock_factors(start_date, end_date, frequency)
+            return tag(mock_df, MOCK, "ff_mock")
+
         if not DATAREADER_AVAILABLE:
-            print("pandas_datareader not available. Generating mock factor data.")
-            return self._generate_mock_factors(start_date, end_date, frequency)
+            raise DataUnavailableError(
+                "FamaFrenchFactors: pandas_datareader is not installed but "
+                "use_mock=False. Install pandas-datareader (pip install "
+                "pandas-datareader) or construct FamaFrenchFactors(use_mock=True) "
+                "for a labelled demo run."
+            )
 
         try:
             # Download Fama-French 5 Factors
@@ -82,12 +103,15 @@ class FamaFrenchFactors:
             print(f"Successfully loaded {len(factors)} periods of factor data")
             print(f"Factors: {list(factors.columns)}")
 
-            return factors
+            return tag(factors, REAL, "famafrench")
 
         except Exception as e:
-            print(f"Error downloading Fama-French factors: {e}")
-            print("Generating mock factor data instead.")
-            return self._generate_mock_factors(start_date, end_date, frequency)
+            logger.error(f"Error downloading Fama-French factors: {e}")
+            raise DataUnavailableError(
+                f"FamaFrenchFactors: failed to download Fama-French factors "
+                f"({frequency}, {start_date} to {end_date}) and use_mock=False. "
+                f"Refusing to fabricate factor data on a production run."
+            ) from e
 
     def _generate_mock_factors(self, start_date: str, end_date: str,
                                frequency: str = 'daily') -> pd.DataFrame:
@@ -95,21 +119,24 @@ class FamaFrenchFactors:
         Generate mock factor data for testing
         """
         if frequency == 'daily':
-            dates = pd.date_range(start=start_date, end=end_date, freq='D')
+            # Business days to match the trading-day calendar of (mock) prices.
+            dates = pd.date_range(start=start_date, end=end_date, freq='B')
         else:
             dates = pd.date_range(start=start_date, end=end_date, freq='M')
 
-        np.random.seed(42)
+        # Local deterministic generator (no global RNG mutation); only
+        # reachable on the explicit mock path.
+        rng = np.random.default_rng(42)
         n = len(dates)
 
         # Generate realistic factor returns
         mock_factors = pd.DataFrame({
-            'Mkt-RF': np.random.normal(0.0003, 0.01, n),  # Market excess return
-            'SMB': np.random.normal(0.0001, 0.005, n),     # Size factor
-            'HML': np.random.normal(0.0001, 0.005, n),     # Value factor
-            'RMW': np.random.normal(0.0001, 0.004, n),     # Profitability
-            'CMA': np.random.normal(0.0001, 0.003, n),     # Investment
-            'Mom': np.random.normal(0.0002, 0.006, n),     # Momentum
+            'Mkt-RF': rng.normal(0.0003, 0.01, n),  # Market excess return
+            'SMB': rng.normal(0.0001, 0.005, n),     # Size factor
+            'HML': rng.normal(0.0001, 0.005, n),     # Value factor
+            'RMW': rng.normal(0.0001, 0.004, n),     # Profitability
+            'CMA': rng.normal(0.0001, 0.003, n),     # Investment
+            'Mom': rng.normal(0.0002, 0.006, n),     # Momentum
             'RF': np.full(n, 0.02 / 252)                   # Risk-free rate (~2% annual)
         }, index=dates)
 

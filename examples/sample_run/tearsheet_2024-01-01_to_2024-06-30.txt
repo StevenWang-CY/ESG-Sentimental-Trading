@@ -1,0 +1,54 @@
+============================================================
+PERFORMANCE TEAR SHEET
+============================================================
+
+RETURN METRICS:
+------------------------------------------------------------
+total_return                  :     -5.16%
+cagr                          :     -7.51%
+annualized_return             :     -7.51%
+annualized_volatility         :     11.90%
+sharpe_ratio                  :      -0.76
+sharpe_ratio_lo_adjusted      :      -0.94
+probabilistic_sharpe          :       0.26
+deflated_sharpe               :       0.26
+sortino_ratio                 :      -1.05
+calmar_ratio                  :      -0.80
+
+RISK METRICS:
+------------------------------------------------------------
+max_drawdown                  :     -9.42%
+avg_drawdown                  :     -4.57%
+var_95                        :     -1.37%
+cvar_95                       :     -1.76%
+downside_deviation            :      8.80%
+volatility                    :     11.90%
+
+TRADING METRICS:
+------------------------------------------------------------
+num_trades                    :      14.00
+avg_trade_size                : 197,179.14
+total_traded                  : 2,760,507.89
+win_rate                      :       0.00
+turnover                      :       4.23
+
+SUMMARY:
+------------------------------------------------------------
+initial_capital               : 1,000,000.00
+final_value                   : 948,397.81
+total_return_pct              :      -5.16
+n_periods                     : 171
+start_date                    : 2023-12-05 00:00:00
+end_date                      : 2024-07-30 00:00:00
+============================================================
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+METRIC VALIDATION WARNINGS
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+⚠ Probabilistic Sharpe (26.42%) < 95%:
+   - Cannot reject SR=0 at 5% significance level
+   - Consider more data or selection-bias adjustments
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+

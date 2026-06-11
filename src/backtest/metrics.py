@@ -51,6 +51,84 @@ class PerformanceAnalyzer:
             'summary': self._calculate_summary_metrics()
         }
 
+    def flatten(self, tear_sheet: Optional[Dict] = None) -> Dict:
+        """
+        Map the NESTED tear-sheet dict into the canonical FLAT metrics dict.
+
+        This flat dict is the single source of truth consumed by
+        ``run_production.py`` (``json.dumps``) and the validators
+        (``scripts/validate_backtest.py``); the keys here must match exactly.
+
+        Args:
+            tear_sheet: A nested tear-sheet dict as produced by
+                :meth:`generate_tear_sheet` ({'returns', 'risk', 'trading',
+                'summary'}). If None, ``generate_tear_sheet()`` is called.
+
+        Returns:
+            Flat dict with all canonical keys. Robust to missing sub-keys:
+            numeric metrics default to 0.0 and counts to 0. Both fraction and
+            ``_pct`` variants are provided where applicable
+            (``*_pct`` == fraction * 100).
+        """
+        if tear_sheet is None:
+            tear_sheet = self.generate_tear_sheet()
+
+        returns = tear_sheet.get('returns', {}) or {}
+        risk = tear_sheet.get('risk', {}) or {}
+        trading = tear_sheet.get('trading', {}) or {}
+
+        # Returns / risk-adjusted-return metrics
+        sharpe_ratio = float(returns.get('sharpe_ratio', 0.0) or 0.0)
+        sharpe_ratio_lo = float(returns.get('sharpe_ratio_lo_adjusted', 0.0) or 0.0)
+        probabilistic_sharpe = float(returns.get('probabilistic_sharpe', 0.0) or 0.0)
+        deflated_sharpe = float(returns.get('deflated_sharpe', 0.0) or 0.0)
+        sortino_ratio = float(returns.get('sortino_ratio', 0.0) or 0.0)
+        calmar_ratio = float(returns.get('calmar_ratio', 0.0) or 0.0)
+
+        # annualized_return is CAGR (geometric); fall back to cagr if absent.
+        cagr = float(returns.get('cagr', 0.0) or 0.0)
+        annualized_return = float(returns.get('annualized_return', cagr) or 0.0)
+        total_return = float(returns.get('total_return', 0.0) or 0.0)
+        # volatility (annualized): prefer risk['volatility'], fall back to
+        # returns['annualized_volatility'].
+        volatility = float(
+            risk.get('volatility', returns.get('annualized_volatility', 0.0)) or 0.0
+        )
+
+        # Risk metrics
+        max_drawdown = float(risk.get('max_drawdown', 0.0) or 0.0)
+
+        # Trading metrics
+        turnover = float(trading.get('turnover', 0.0) or 0.0)
+        num_trades = int(trading.get('num_trades', 0) or 0)
+        win_rate = float(trading.get('win_rate', 0.0) or 0.0)
+
+        return {
+            # Risk-adjusted return ratios
+            'sharpe_ratio': sharpe_ratio,
+            'sharpe_ratio_lo_adjusted': sharpe_ratio_lo,
+            'probabilistic_sharpe': probabilistic_sharpe,
+            'deflated_sharpe': deflated_sharpe,
+            'sortino_ratio': sortino_ratio,
+            # Returns (fraction + percent variants)
+            'annualized_return': annualized_return,            # CAGR fraction
+            'annualized_return_pct': annualized_return * 100.0,
+            'cagr': cagr,
+            'total_return': total_return,                      # fraction
+            'total_return_pct': total_return * 100.0,
+            # Volatility (fraction + percent variants)
+            'volatility': volatility,                          # annualized fraction
+            'volatility_pct': volatility * 100.0,
+            # Drawdown (fraction negative + percent negative variants)
+            'max_drawdown': max_drawdown,                      # fraction (negative)
+            'max_drawdown_pct': max_drawdown * 100.0,          # percent (negative)
+            'calmar_ratio': calmar_ratio,
+            # Trading
+            'turnover': turnover,                              # annualized
+            'num_trades': num_trades,
+            'win_rate': win_rate,
+        }
+
     def _calculate_return_metrics(self) -> Dict:
         """Calculate return-based metrics"""
         total_return = self.result.get_total_return()
@@ -69,6 +147,11 @@ class PerformanceAnalyzer:
         sharpe_naive = self._calculate_sharpe_ratio()
         sharpe_lo = self._calculate_sharpe_ratio_lo_adjusted()
         psr = self._calculate_probabilistic_sharpe(sr_benchmark=0.0)
+        # BT-09: called with n_trials=1, so there is NO multiple-testing
+        # selection-bias correction and deflated_sharpe == probabilistic_sharpe
+        # by construction. A genuine Deflated Sharpe Ratio requires the real
+        # number of strategy configurations tried during research; that count
+        # is not tracked here, so we do not overstate this as a true DSR.
         dsr = self._calculate_deflated_sharpe(n_trials=1)
 
         return {
@@ -100,21 +183,32 @@ class PerformanceAnalyzer:
         }
 
     def _calculate_trading_metrics(self) -> Dict:
-        """Calculate trading-related metrics"""
+        """
+        Calculate trading-related metrics.
+
+        DRIFT-06: every branch (empty-trades and populated) returns the SAME
+        key set so downstream consumers never KeyError on a missing field:
+        num_trades, avg_trade_size, total_traded, win_rate, turnover. This
+        analyzer does not compute per-trade P&L, so win_rate defaults to 0.0
+        (the institutional EnhancedPerformanceAnalyzer computes it).
+        """
         if self.result.trades.empty:
             return {
                 'num_trades': 0,
+                'avg_trade_size': 0.0,
+                'total_traded': 0.0,
                 'win_rate': 0.0,
-                'avg_trade': 0.0,
                 'turnover': 0.0
             }
 
         trades = self.result.trades
+        has_value = 'value' in trades.columns
 
         return {
             'num_trades': len(trades),
-            'avg_trade_size': trades['value'].abs().mean() if 'value' in trades.columns else 0,
-            'total_traded': trades['value'].abs().sum() if 'value' in trades.columns else 0,
+            'avg_trade_size': float(trades['value'].abs().mean()) if has_value else 0.0,
+            'total_traded': float(trades['value'].abs().sum()) if has_value else 0.0,
+            'win_rate': 0.0,
             'turnover': self._calculate_turnover()
         }
 
@@ -289,6 +383,13 @@ class PerformanceAnalyzer:
 
         For n_trials=1, DSR ≡ PSR(0) (no selection bias correction).
 
+        BT-09 honesty note: a TRUE deflated Sharpe ratio needs the real number
+        of distinct strategy configurations evaluated during research
+        (``n_trials``). When called with ``n_trials=1`` (the default in this
+        tear sheet), the returned value IS the Probabilistic Sharpe Ratio and
+        carries no multiple-testing deflation; it should not be reported as a
+        bias-corrected DSR.
+
         Reference: Bailey, D.H. & Lopez de Prado, M. (2014)
         "The Deflated Sharpe Ratio", Journal of Portfolio Management, 40(5).
         """
@@ -296,6 +397,7 @@ class PerformanceAnalyzer:
             return 0.0
 
         if n_trials <= 1:
+            # No selection bias to correct: deflated_sharpe == PSR(0).
             return self._calculate_probabilistic_sharpe(
                 sr_benchmark=0.0,
                 risk_free_rate=risk_free_rate,
@@ -422,7 +524,21 @@ class PerformanceAnalyzer:
         return self.returns[self.returns <= var].mean()
 
     def _calculate_turnover(self) -> float:
-        """Calculate portfolio turnover"""
+        """
+        Calculate ANNUALIZED portfolio turnover.
+
+        Definition (BT-05): turnover is the total dollar value traded over the
+        backtest divided by the average portfolio value, then annualized by
+        dividing by the number of years in the sample. This makes the figure
+        comparable across backtests of differing lengths (a raw
+        total_traded / avg_portfolio_value ratio is duration-dependent and
+        grows with the length of the test):
+
+            turnover_annual = (total_traded / avg_portfolio_value) / n_years
+
+        where ``n_years = n_periods / 252`` (daily-return assumption). A
+        floor of 1e-9 guards against division by zero for sub-day samples.
+        """
         if self.result.trades.empty:
             return 0.0
 
@@ -432,7 +548,9 @@ class PerformanceAnalyzer:
         if avg_portfolio_value == 0:
             return 0.0
 
-        return total_traded / avg_portfolio_value
+        n_years = len(self.returns) / 252
+        raw_turnover = total_traded / avg_portfolio_value
+        return raw_turnover / max(n_years, 1e-9)
 
     def _get_empty_metrics(self) -> Dict:
         """Return empty metrics when no data"""
@@ -461,6 +579,7 @@ class PerformanceAnalyzer:
                 'num_trades': 0,
                 'avg_trade_size': 0.0,
                 'total_traded': 0.0,
+                'win_rate': 0.0,
                 'turnover': 0.0
             },
             'summary': {

@@ -13,6 +13,9 @@ Academic references for transaction cost modeling:
 - Engelberg, Reed & Ringgenberg (2018) "Short-selling risk", JF.
 """
 
+import bisect
+import logging
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -23,12 +26,14 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
+logger = logging.getLogger(__name__)
+
 try:
     from risk import RiskManager, DrawdownController
     RISK_MANAGEMENT_AVAILABLE = True
 except ImportError:
     RISK_MANAGEMENT_AVAILABLE = False
-    print("Warning: Risk management modules not available")
+    logger.warning("Risk management modules not available")
 
 
 class BacktestEngine:
@@ -125,6 +130,10 @@ class BacktestEngine:
         self.daily_returns = []
         self.cash = initial_capital  # Track cash separately
 
+        # Per-period diagnostics
+        self._all_dates: List[datetime] = []  # Sorted trading dates (set in run())
+        self.exposure_history: List[Dict] = []  # {date, gross_exposure, net_exposure}
+
         # Initialize risk management
         if self.enable_risk_management:
             self.risk_manager = RiskManager(
@@ -133,14 +142,22 @@ class BacktestEngine:
                 max_drawdown_threshold=max_drawdown_threshold,
                 min_positions=2,  # Concentrated ESG event-driven (matches config)
                 leverage_limit=leverage_limit,
-                balance_long_short=self.balance_long_short
+                balance_long_short=self.balance_long_short,
+                gross_exposure_target=leverage_limit,  # Neutral book: gross == leverage
             )
+            # BT-01: instantiate the drawdown controller ONCE here. It is fed the
+            # running portfolio value every day in run() so peak/drawdown
+            # accumulate; it must NOT be rebuilt each rebalance (that would wipe
+            # portfolio_values/drawdown_history and keep drawdown pinned at 0).
             self.drawdown_controller = DrawdownController(
                 drawdown_thresholds=[-0.10, -0.15, -0.20, -0.25],
                 exposure_levels=[0.95, 0.85, 0.70, 0.50]
             )
-            print(f"Risk management enabled: max_pos={max_position_size:.1%}, "
-                  f"target_vol={target_volatility:.1%}, max_dd={max_drawdown_threshold:.1%}")
+            logger.info(
+                "Risk management enabled: max_pos=%.1f%%, target_vol=%.1f%%, max_dd=%.1f%%",
+                max_position_size * 100, target_volatility * 100,
+                max_drawdown_threshold * 100,
+            )
         else:
             self.risk_manager = None
             self.drawdown_controller = None
@@ -294,13 +311,15 @@ class BacktestEngine:
         Args:
             signals: DataFrame with columns [ticker, date, weight]
             rebalance_freq: Rebalancing frequency ('D', 'W', 'M')
-            holding_period: Days to hold positions
+            holding_period: Holding period in TRADING days (not calendar days).
+                A position is liquidated once the number of trading dates that
+                have elapsed since its entry reaches this value.
 
         Returns:
             BacktestResult object
         """
         if signals.empty:
-            print("No signals provided. Creating empty result.")
+            logger.warning("No signals provided. Creating empty result.")
             return self._create_empty_result()
 
         # Prepare data
@@ -315,10 +334,14 @@ class BacktestEngine:
 
         # CRITICAL FIX: Remove NaT values which can break date comparison
         all_dates = [d for d in all_dates if pd.notna(d)]
-        
+
         if not all_dates:
-            print("ERROR: No valid dates in price data.")
+            logger.error("No valid dates in price data.")
             return self._create_empty_result()
+
+        # BT-02: store the sorted trading dates so holding period can be measured
+        # in TRADING days (via bisect) rather than calendar days.
+        self._all_dates = all_dates
 
         # CRITICAL FIX: Filter signals to only include dates within price data range
         # This prevents 0 trades when signals exist outside backtest window
@@ -330,27 +353,33 @@ class BacktestEngine:
         filtered_count = original_signal_count - len(signals)
 
         if filtered_count > 0:
-            print(f"\nWARNING: Filtered out {filtered_count} signals outside price data range")
-            print(f"  Price range: {price_start} to {price_end}")
+            logger.warning(
+                "Filtered out %d signals outside price data range (%s to %s)",
+                filtered_count, price_start, price_end,
+            )
 
         if signals.empty:
-            print("ERROR: No signals within price data range. Backtest cannot proceed.")
+            logger.error("No signals within price data range. Backtest cannot proceed.")
             return self._create_empty_result()
 
         # Get rebalancing dates
         rebalance_dates = self._get_rebalance_dates(signals, rebalance_freq)
-        print(f"\nDEBUG: Backtest setup:")
-        print(f"  Total signals/positions in portfolio: {len(signals)}")
-        print(f"  Unique rebalance dates: {len(rebalance_dates)}")
-        print(f"  Rebalance dates: {rebalance_dates[:5]}")
+        logger.debug(
+            "Backtest setup: %d signals/positions, %d rebalance dates (first 5: %s)",
+            len(signals), len(rebalance_dates), rebalance_dates[:5],
+        )
 
         # Initialize tracking
         cash = self.initial_capital
         current_positions = {}
         portfolio_values = []
         returns = []
+        self.exposure_history = []
 
-        print(f"  Price data dates: {len(all_dates)} (from {all_dates[0]} to {all_dates[-1]})")
+        logger.debug(
+            "Price data dates: %d (from %s to %s)",
+            len(all_dates), all_dates[0], all_dates[-1],
+        )
 
         # Simulate trading
         rebalance_count = 0
@@ -376,14 +405,27 @@ class BacktestEngine:
                 date, current_positions, cash
             )
 
+            # BT-01: feed the running portfolio value into the drawdown
+            # controller EVERY day so peak/drawdown accumulate. The controller is
+            # instantiated once (in __init__) and never rebuilt mid-run; a
+            # sustained drawdown therefore drives exposure_scalar < 1.0 and can
+            # eventually trip should_halt_trading(). Use portfolio_value_before
+            # (the mark BEFORE today's rebalance) so the rebalance decision sees
+            # the accumulated drawdown state for this day.
+            if self.enable_risk_management and self.drawdown_controller is not None:
+                self.drawdown_controller.update(portfolio_value_before)
+
             # Check if we should rebalance
             if date in rebalance_dates:
                 rebalance_count += 1
-                print(f"DEBUG: Rebalancing #{rebalance_count} on {date}")
+                logger.debug("Rebalancing #%d on %s", rebalance_count, date)
                 current_positions, cash = self._rebalance_with_cash(
                     date, signals, current_positions, cash, portfolio_value_before, holding_period
                 )
-                print(f"DEBUG:   Created {len(current_positions)} positions, {len(self.trades)} total trades")
+                logger.debug(
+                    "  Created %d positions, %d total trades",
+                    len(current_positions), len(self.trades),
+                )
 
             # Calculate portfolio value AFTER rebalancing
             portfolio_value = self._calculate_portfolio_value_correct(
@@ -393,6 +435,28 @@ class BacktestEngine:
             portfolio_values.append({
                 'date': date,
                 'value': portfolio_value
+            })
+
+            # Track gross/net exposure for this day (as a fraction of portfolio
+            # value): gross = sum|market value| / PV, net = sum(signed MV) / PV.
+            gross_mv = 0.0
+            net_mv = 0.0
+            for ticker, position in current_positions.items():
+                px = self._get_price(date, ticker)
+                if px and px > 0:
+                    mv = position['shares'] * px
+                    gross_mv += abs(mv)
+                    net_mv += mv
+            if portfolio_value > 0:
+                gross_exposure = gross_mv / portfolio_value
+                net_exposure = net_mv / portfolio_value
+            else:
+                gross_exposure = 0.0
+                net_exposure = 0.0
+            self.exposure_history.append({
+                'date': date,
+                'gross_exposure': gross_exposure,
+                'net_exposure': net_exposure,
             })
 
             # Calculate return
@@ -408,7 +472,8 @@ class BacktestEngine:
             returns=pd.DataFrame(returns),
             trades=pd.DataFrame(self.trades),
             positions=pd.DataFrame(self.positions),
-            initial_capital=self.initial_capital
+            initial_capital=self.initial_capital,
+            exposure_history=pd.DataFrame(self.exposure_history),
         )
 
         return result
@@ -471,20 +536,31 @@ class BacktestEngine:
             rebalance_dates = trading_df.groupby('month')['date'].max().tolist()
             return sorted(rebalance_dates)
         else:
-            print(f"WARNING: Unknown rebalance frequency '{freq}', defaulting to signal dates")
+            logger.warning(
+                "Unknown rebalance frequency '%s', defaulting to signal dates", freq,
+            )
             return sorted(signal_dates)
 
     def _rebalance_with_cash(self, date: datetime, signals: pd.DataFrame,
                              current_positions: Dict, cash: float,
                              portfolio_value: float, holding_period: int = 10) -> tuple:
-        """Execute rebalancing with proper cash tracking and holding period management"""
+        """Execute rebalancing with proper cash tracking and holding period management.
+
+        ``holding_period`` is measured in TRADING days, not calendar days.
+        """
         # CRITICAL FIX: Only liquidate positions past their holding period
         # This allows multiple positions to be held simultaneously (core of event-driven strategy)
         positions_to_keep = {}
 
         for ticker, position in list(current_positions.items()):
             entry_date = position['entry_date']
-            days_held = (date - entry_date).days
+            # BT-02: holding period is in TRADING days. Count the trading dates in
+            # self._all_dates strictly AFTER entry_date up to and including `date`
+            # via bisect, instead of (date - entry_date).days (calendar days),
+            # which over-counted across weekends/holidays.
+            lo = bisect.bisect_right(self._all_dates, entry_date)
+            hi = bisect.bisect_right(self._all_dates, date)
+            days_held = max(hi - lo, 0)
 
             # Check if position should be liquidated (past holding period)
             if days_held >= holding_period:
@@ -499,11 +575,17 @@ class BacktestEngine:
                         date, ticker, abs(proceeds)
                     )
                     cash -= abs(proceeds) * (self.commission_pct + slippage_rate)
-                    print(f"DEBUG:   Liquidated {ticker} after {days_held} days (holding period: {holding_period})")
+                    logger.debug(
+                        "  Liquidated %s after %d trading days (holding period: %d)",
+                        ticker, days_held, holding_period,
+                    )
             else:
                 # Keep position (still within holding period)
                 positions_to_keep[ticker] = position
-                print(f"DEBUG:   Keeping {ticker} (held for {days_held}/{holding_period} days)")
+                logger.debug(
+                    "  Keeping %s (held for %d/%d trading days)",
+                    ticker, days_held, holding_period,
+                )
 
         # Start with positions we're keeping
         current_positions = positions_to_keep
@@ -511,13 +593,16 @@ class BacktestEngine:
         # Get target weights for this date
         target_signals = signals[signals['date'] == date].copy()
 
-        print(f"DEBUG:   Found {len(target_signals)} signals for {date}")
+        logger.debug("  Found %d signals for %s", len(target_signals), date)
         if target_signals.empty:
             # CRITICAL FIX: Return kept positions, NOT empty dict
             # Previous bug: returned ({}, cash) which dropped all active positions
             # that were within their holding period. This caused positions to vanish
             # on rebalance dates without new signals.
-            print(f"DEBUG:   No new signals for {date}, keeping {len(positions_to_keep)} active positions")
+            logger.debug(
+                "  No new signals for %s, keeping %d active positions",
+                date, len(positions_to_keep),
+            )
             return positions_to_keep, cash
 
         # Apply risk management if enabled
@@ -528,15 +613,18 @@ class BacktestEngine:
             else:
                 returns_series = None
 
+            # BT-01: refresh ONLY the adaptive thresholds in place (do NOT
+            # rebuild the controller, which would wipe the accumulated
+            # portfolio_values/drawdown_history and pin drawdown at 0). The
+            # controller is fed the running portfolio value every day in run(),
+            # so its peak/drawdown state already reflects the sustained drawdown.
             if (
                 self.adaptive_drawdown_thresholds and
                 returns_series is not None and
                 len(returns_series) >= 60 and
                 self.drawdown_controller is not None
             ):
-                self.drawdown_controller = DrawdownController.from_historical_data(
-                    returns_series
-                )
+                self.drawdown_controller.recalibrate_thresholds(returns_series)
 
             # Apply comprehensive risk controls
             target_signals = self.risk_manager.apply_risk_controls(
@@ -546,25 +634,35 @@ class BacktestEngine:
                 returns_history=returns_series
             )
 
-            # Apply drawdown-based exposure reduction
+            # Apply drawdown-based exposure reduction using the ACCUMULATED state.
+            # The daily run-loop update() already advanced the controller for this
+            # date, so scale by the current accumulated exposure level rather than
+            # calling apply_to_portfolio() (which would feed the same value again
+            # and double-count the drawdown history).
             if self.drawdown_controller is not None:
-                target_signals = self.drawdown_controller.apply_to_portfolio(
-                    portfolio=target_signals,
-                    current_value=portfolio_value
-                )
+                exposure_scalar = self.drawdown_controller.current_exposure_level
+                if exposure_scalar < 1.0:
+                    target_signals = target_signals.copy()
+                    target_signals['weight'] *= exposure_scalar
 
-            # Check for trading halt conditions
-            if self.drawdown_controller.should_halt_trading():
-                print(f"WARNING: Trading halted at {date} due to extreme conditions!")
-                print(f"Drawdown metrics: {self.drawdown_controller.get_drawdown_metrics()}")
+            # Check for trading halt conditions against the accumulated state
+            if (
+                self.drawdown_controller is not None
+                and self.drawdown_controller.should_halt_trading()
+            ):
+                logger.warning(
+                    "Trading halted at %s due to extreme conditions! Drawdown metrics: %s",
+                    date, self.drawdown_controller.get_drawdown_metrics(),
+                )
                 return {}, cash  # Exit all positions
 
         # Calculate target positions using portfolio value (not just cash)
         new_positions = {}
 
-        print(f"DEBUG:   Target signals after risk management:")
-        for idx, row in target_signals.iterrows():
-            print(f"DEBUG:     {row['ticker']}: weight={row['weight']:.4f}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("  Target signals after risk management:")
+            for _, row in target_signals.iterrows():
+                logger.debug("    %s: weight=%.4f", row['ticker'], row['weight'])
 
         for _, row in target_signals.iterrows():
             ticker = row['ticker']
@@ -572,7 +670,7 @@ class BacktestEngine:
             # FIX 5.1: Prevent duplicate positions for the same ticker
             # If ticker already has an active position (within holding period), skip it
             if ticker in current_positions:
-                print(f"DEBUG:     SKIPPED - {ticker} already has an active position")
+                logger.debug("    SKIPPED - %s already has an active position", ticker)
                 continue
 
             weight = row['weight']
@@ -580,17 +678,20 @@ class BacktestEngine:
             # Get current price
             price = self._get_price(date, ticker)
 
-            print(f"DEBUG:   Processing {ticker}: weight={weight:.4f}, price={price}, portfolio_value={portfolio_value:,.2f}")
+            logger.debug(
+                "  Processing %s: weight=%.4f, price=%s, portfolio_value=%.2f",
+                ticker, weight, price, portfolio_value,
+            )
 
             # CRITICAL FIX: Also check for NaN prices (can cause ValueError when converting to int)
             if price is None or pd.isna(price) or price <= 0:
-                print(f"DEBUG:     REJECTED - Invalid price: {price}")
+                logger.debug("    REJECTED - Invalid price: %s", price)
                 continue
 
             # Calculate target dollar amount based on portfolio value
             target_value = portfolio_value * weight
 
-            print(f"DEBUG:     Target value: ${target_value:,.2f}")
+            logger.debug("    Target value: $%.2f", target_value)
 
             # Dynamic slippage: static + Almgren-Chriss square-root impact
             slippage_rate = self._compute_slippage_rate(
@@ -605,7 +706,10 @@ class BacktestEngine:
                     shares = 1  # Minimum 1 share if target covers at least half a share
                 cost = shares * price * (1 + self.commission_pct + slippage_rate)
                 cash -= cost
-                print(f"DEBUG:     LONG: {shares} shares @ ${price:.2f} = ${cost:,.2f} (slippage={slippage_rate*10000:.1f}bps)")
+                logger.debug(
+                    "    LONG: %d shares @ $%.2f = $%.2f (slippage=%.1fbps)",
+                    shares, price, cost, slippage_rate * 10000,
+                )
             else:
                 # Short position (negative shares) - also use round() for consistency
                 shares = round(target_value / (price * (1 - self.commission_pct - slippage_rate)))
@@ -613,7 +717,10 @@ class BacktestEngine:
                     shares = -1  # Minimum 1 share short if target covers at least half a share
                 proceeds = abs(shares) * price * (1 - self.commission_pct - slippage_rate)
                 cash += proceeds
-                print(f"DEBUG:     SHORT: {shares} shares @ ${price:.2f} = ${proceeds:,.2f} (slippage={slippage_rate*10000:.1f}bps)")
+                logger.debug(
+                    "    SHORT: %d shares @ $%.2f = $%.2f (slippage=%.1fbps)",
+                    shares, price, proceeds, slippage_rate * 10000,
+                )
 
             if shares != 0:
                 new_positions[ticker] = {
@@ -630,13 +737,16 @@ class BacktestEngine:
                     'price': price,
                     'value': shares * price
                 })
-                print(f"DEBUG:     ✓ Position created")
+                logger.debug("    Position created")
             else:
-                print(f"DEBUG:     REJECTED - Shares = 0")
+                logger.debug("    REJECTED - Shares = 0")
 
         # Merge kept positions with new positions
         current_positions.update(new_positions)
-        print(f"DEBUG:   Total positions after rebalance: {len(current_positions)} (kept: {len(positions_to_keep)}, new: {len(new_positions)})")
+        logger.debug(
+            "  Total positions after rebalance: %d (kept: %d, new: %d)",
+            len(current_positions), len(positions_to_keep), len(new_positions),
+        )
 
         return current_positions, cash
 
@@ -663,38 +773,6 @@ class BacktestEngine:
                     short_value += abs(market_value)
 
         # Net Liquidation Value
-        total_value = cash + long_value - short_value
-
-        return total_value
-
-    def _calculate_portfolio_value(self, date: datetime,
-                                   positions: Dict, cash: float) -> float:
-        """
-        Calculate total portfolio value including cash and positions
-
-        For long-short strategies:
-        - Cash starts at initial_capital
-        - Long positions: cash decreases by purchase amount, increases by sale proceeds
-        - Short positions: cash increases by short proceeds, decreases by cover amount
-        - Portfolio value = cash + sum(long position values) - sum(short position values)
-        """
-        # Calculate position values
-        long_value = 0
-        short_value = 0
-
-        for ticker, position in positions.items():
-            price = self._get_price(date, ticker)
-            if price:
-                position_value = position['shares'] * price
-                if position['shares'] > 0:
-                    long_value += position_value
-                else:
-                    short_value += abs(position_value)  # Short positions are negative shares
-
-        # For long-short: total value = initial capital + P&L from both long and short
-        # P&L from longs = current_long_value - cash_spent_on_longs
-        # P&L from shorts = cash_from_shorts - cost_to_cover_shorts
-        # Simplified: track net liquidation value
         total_value = cash + long_value - short_value
 
         return total_value
@@ -750,7 +828,7 @@ class BacktestEngine:
 
             return None
         except Exception as e:
-            print(f"ERROR in _get_price({date}, {ticker}): {e}")
+            logger.error("Error in _get_price(%s, %s): %s", date, ticker, e)
             return None
 
     def _create_empty_result(self) -> 'BacktestResult':
@@ -771,7 +849,8 @@ class BacktestResult:
 
     def __init__(self, portfolio_values: pd.DataFrame, returns: pd.DataFrame,
                  trades: pd.DataFrame, positions: pd.DataFrame,
-                 initial_capital: float):
+                 initial_capital: float,
+                 exposure_history: Optional[pd.DataFrame] = None):
         """
         Initialize backtest result
 
@@ -781,12 +860,19 @@ class BacktestResult:
             trades: DataFrame with all trades
             positions: DataFrame with position history
             initial_capital: Initial capital
+            exposure_history: Optional DataFrame with per-day gross/net exposure
+                (columns: date, gross_exposure, net_exposure).
         """
         self.portfolio_values = portfolio_values
         self.returns = returns
         self.trades = trades
         self.positions = positions
         self.initial_capital = initial_capital
+        if exposure_history is None:
+            exposure_history = pd.DataFrame(
+                columns=['date', 'gross_exposure', 'net_exposure']
+            )
+        self.exposure_history = exposure_history
 
         # Calculate summary statistics
         if not returns.empty:
@@ -818,3 +904,34 @@ class BacktestResult:
             pd.Series: Daily returns indexed by date
         """
         return self.returns_series
+
+    def get_drawdown_series(self) -> pd.Series:
+        """Get the running drawdown series derived from the equity curve.
+
+        Drawdown on each date is (value - running_peak) / running_peak, so it is
+        <= 0, with 0 at new highs.
+
+        Returns:
+            pd.Series: Drawdown indexed by date (empty if no equity curve).
+        """
+        equity = self.get_equity_curve()
+        if equity.empty:
+            return pd.Series(dtype=float)
+        running_peak = equity.cummax()
+        drawdown = (equity - running_peak) / running_peak
+        return drawdown
+
+    def get_exposure_series(self) -> pd.DataFrame:
+        """Get the per-day gross/net exposure series.
+
+        Returns:
+            pd.DataFrame indexed by date with columns
+            ['gross_exposure', 'net_exposure']. Empty (with those columns) when
+            no exposure history was recorded.
+        """
+        if self.exposure_history is None or self.exposure_history.empty:
+            return pd.DataFrame(columns=['gross_exposure', 'net_exposure'])
+        df = self.exposure_history.copy()
+        if 'date' in df.columns:
+            df = df.set_index('date')
+        return df[['gross_exposure', 'net_exposure']]

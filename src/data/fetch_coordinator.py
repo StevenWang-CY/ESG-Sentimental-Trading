@@ -37,6 +37,8 @@ from typing import Any, Callable, Dict, List, Optional, Protocol
 import numpy as np
 import pandas as pd
 
+from src.utils.provenance import REAL, EMPTY, tag
+
 logger = logging.getLogger(__name__)
 
 
@@ -92,16 +94,19 @@ class CoordinatedResult:
 
     @property
     def successful_sources(self) -> List[str]:
+        # A source only counts as successful if it returned real, non-empty
+        # data. An empty real fetch (no rows) must NOT count toward quorum.
         return [
             name for name, r in self.source_results.items()
-            if r.status in (SourceStatus.SUCCESS, SourceStatus.PARTIAL)
+            if r.status == SourceStatus.SUCCESS and r.row_count > 0
         ]
 
     @property
     def failed_sources(self) -> List[str]:
+        successful = set(self.successful_sources)
         return [
-            name for name, r in self.source_results.items()
-            if r.status not in (SourceStatus.SUCCESS, SourceStatus.PARTIAL)
+            name for name in self.source_results
+            if name not in successful
         ]
 
     def summary(self) -> str:
@@ -391,7 +396,9 @@ class FetchCoordinator:
             # No sources configured - return empty result immediately
             return CoordinatedResult(
                 source_results={},
-                combined_data=pd.DataFrame(columns=STANDARD_COLUMNS),
+                combined_data=tag(
+                    pd.DataFrame(columns=STANDARD_COLUMNS), EMPTY, "multi_source"
+                ),
                 quorum_met=(min_sources <= 0),
                 total_latency_ms=(time.monotonic() - wall_start) * 1000,
             )
@@ -451,15 +458,23 @@ class FetchCoordinator:
                     error="Source did not complete within timeout",
                 )
 
-        # Check quorum
+        # Check quorum. Only sources that returned real, non-empty data count
+        # toward quorum. An empty (zero-row) fetch must NOT satisfy quorum, so
+        # an all-empty fetch never appears "valid".
         successful_count = sum(
             1 for r in source_results.values()
-            if r.status in (SourceStatus.SUCCESS, SourceStatus.PARTIAL)
+            if r.status == SourceStatus.SUCCESS and r.row_count > 0
         )
         quorum_met = successful_count >= min_sources
 
         # Combine data from all successful sources
         combined = self._combine_results(source_results, max_results)
+
+        # Stamp provenance on the combined frame. pd.concat inside
+        # _combine_results drops df.attrs, so the marker must be re-applied
+        # here based on the total row count: real data if any rows survived,
+        # otherwise EMPTY (a legitimate real fetch that yielded nothing).
+        tag(combined, REAL if len(combined) > 0 else EMPTY, "multi_source")
 
         wall_elapsed = (time.monotonic() - wall_start) * 1000
 
@@ -532,17 +547,28 @@ class FetchCoordinator:
                 # Enforce schema on the result
                 df = enforce_schema(df)
 
-                # Determine status
+                # Determine status. An empty real fetch returned NO usable
+                # rows: it must not count toward quorum and must not be
+                # reported as a healthy source. Treat it as a non-success
+                # (PARTIAL) and record a circuit-breaker failure so a source
+                # that always returns nothing eventually trips the breaker
+                # instead of silently satisfying quorum with zero data.
                 if df.empty:
-                    status = SourceStatus.PARTIAL
-                else:
-                    status = SourceStatus.SUCCESS
+                    cb.record_failure()
+                    return SourceResult(
+                        source_name=source_name,
+                        status=SourceStatus.PARTIAL,
+                        data=tag(df, EMPTY, source_name),
+                        latency_ms=(time.monotonic() - start) * 1000,
+                        retry_count=attempt,
+                        error="Source returned zero rows",
+                    )
 
                 cb.record_success()
 
                 return SourceResult(
                     source_name=source_name,
-                    status=status,
+                    status=SourceStatus.SUCCESS,
                     data=df,
                     latency_ms=(time.monotonic() - start) * 1000,
                     retry_count=attempt,
@@ -588,11 +614,12 @@ class FetchCoordinator:
         """
         dfs = []
         for name, result in source_results.items():
-            if result.status in (SourceStatus.SUCCESS, SourceStatus.PARTIAL):
-                if not result.data.empty:
-                    df = result.data.copy()
-                    df['_source'] = name
-                    dfs.append(df)
+            # Only combine real, non-empty data. Empty fetches (PARTIAL) carry
+            # no rows and must not contribute to the combined frame.
+            if result.status == SourceStatus.SUCCESS and not result.data.empty:
+                df = result.data.copy()
+                df['_source'] = name
+                dfs.append(df)
 
         if not dfs:
             return pd.DataFrame(columns=STANDARD_COLUMNS)

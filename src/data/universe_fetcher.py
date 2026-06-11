@@ -3,10 +3,16 @@ Universe Fetcher
 Fetches stock universes (NASDAQ-100, S&P 500, etc.)
 """
 
+import re
 import pandas as pd
 import requests
 from typing import List, Dict, Optional
 from datetime import datetime
+
+# Valid US equity ticker: 1-6 chars, letters plus optional dotted/dashed
+# class/share suffix (e.g. BRK.B, BF.B, BRK-B). Lets multi-class tickers through
+# the cleaning step that a strict isalpha() check would silently drop.
+_VALID_TICKER_RE = re.compile(r'^[A-Z]{1,6}([.\-][A-Z]{1,2})?$')
 
 
 class UniverseFetcher:
@@ -27,6 +33,11 @@ class UniverseFetcher:
 
         Returns:
             List of ticker symbols
+
+        SURVIVORSHIP CAVEAT: Wikipedia and the hardcoded fallback list both
+        reflect CURRENT index constituents. Using them for a backtest over a
+        historical window introduces survivorship bias (stocks that were
+        deleted from the index are missing). as_of_date is not yet honored.
         """
         # Check cache first
         if 'nasdaq100' in self.cache:
@@ -46,8 +57,10 @@ class UniverseFetcher:
                     # Clean tickers
                     tickers = [str(t).strip().upper() for t in tickers if pd.notna(t)]
 
-                    # Remove any non-ticker entries
-                    tickers = [t for t in tickers if t and len(t) <= 5 and t.isalpha()]
+                    # Remove any non-ticker entries. Allow valid dotted/dashed
+                    # multi-class tickers (e.g. BRK.B) instead of requiring
+                    # t.isalpha(), which silently dropped them.
+                    tickers = [t for t in tickers if _VALID_TICKER_RE.match(t)]
 
                     if len(tickers) > 50:  # Should have ~100 tickers
                         self.cache['nasdaq100'] = tickers

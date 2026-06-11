@@ -1,14 +1,21 @@
 """
 Walk-Forward Validation Framework for ESG Strategy
 
-Implements proper walk-forward validation to eliminate look-ahead bias and provide
-realistic out-of-sample performance estimates.
+Implements an honest TIME-PARTITION out-of-sample validator that measures the
+TEMPORAL STABILITY of a FIXED set of signals. It does NOT re-optimize
+hyperparameters or signal weights per fold: the signals supplied to
+``validate()`` already carry their final per-row weights, so re-deriving weights
+would be a no-op that fabricates a false out-of-sample assurance. Instead, each
+fold slices the fixed signals + prices into a train window and an embargoed test
+window, backtests each independently, and reports train-vs-test (OOS) metrics,
+overfit ratio, and selection-bias-aware Sharpe statistics.
 
 Key principles:
-1. At any point t, only use data from [0, t) for training
-2. Testing is done on [t, t+test_period) with an embargo gap
-3. Parameters derived from training data ONLY
-4. No peeking at future data for any calibration
+1. At any point t, only use data from [0, t) for the train window.
+2. Testing is done on [t, t+test_period) with a mandatory embargo gap.
+3. No peeking at future data: train and test backtests are fully independent.
+4. The pass/fail gate tests whether the fixed signals generalize out-of-sample,
+   NOT whether a re-optimized configuration happens to look good in-sample.
 
 Academic references:
 - Bailey, D. H., & Lopez de Prado, M. (2014). The deflated Sharpe ratio
@@ -17,12 +24,15 @@ Academic references:
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional, Protocol, TypeAlias
 from enum import Enum, auto
+
+logger = logging.getLogger(__name__)
 
 
 # Type aliases for clarity
@@ -76,13 +86,20 @@ class ValidationWindow:
 
 @dataclass
 class ValidationResult:
-    """Results from a single validation fold."""
+    """Results from a single validation fold.
+
+    ``optimal_params`` is retained for backward compatibility with callers that
+    inspect the field, but walk-forward validation does NOT re-optimize
+    parameters per fold (the signals are fixed). It therefore defaults to an
+    empty dict and should be treated as documentary metadata, not as a tuned
+    configuration.
+    """
     window: ValidationWindow
     train_sharpe: float
     test_sharpe: float
     train_n_trades: int
     test_n_trades: int
-    optimal_params: Dict
+    optimal_params: Dict = field(default_factory=dict)
     train_return: float = 0.0
     test_return: float = 0.0
     train_max_drawdown: float = 0.0
@@ -318,6 +335,14 @@ class WeightOptimizer:
     Optimizer for signal weights using only training data.
 
     CRITICAL: Never uses test data for optimization.
+
+    NOTE: This class is retained for backward compatibility (it is exported from
+    ``src.validation.__init__`` and exercised directly by the unit tests) and may
+    be used by callers that build their own calibration loop. It is deliberately
+    NOT invoked by :meth:`WalkForwardValidator.validate`, because the signals
+    passed to walk-forward validation already carry their final per-row weights;
+    re-deriving weights there would be a no-op that fabricates a false
+    out-of-sample assurance. See the ``validate`` docstring for details.
     """
 
     def __init__(
@@ -350,7 +375,7 @@ class WeightOptimizer:
         feature_columns = ['event_confidence', 'sentiment_intensity', 'volume_ratio']
 
         if not all(col in train_signals.columns for col in feature_columns):
-            print("Warning: Missing feature columns, using equal weights")
+            logger.warning("Missing feature columns, using equal weights")
             return SignalWeights.from_equal_weight()
 
         # Create features DataFrame
@@ -379,15 +404,23 @@ class WeightOptimizer:
 
 class WalkForwardValidator:
     """
-    Walk-forward validation with expanding window.
+    Walk-forward (expanding-window) out-of-sample validator for FIXED signals.
 
-    Key principle: At any point t, we only use data from [0, t) for training.
-    Testing is done on [t, t+test_period) with an embargo gap.
+    Key principle: At any point t, the train window uses only data from [0, t);
+    the test window is [t, t+test_period) separated by a mandatory embargo gap.
+
+    This validator measures the TEMPORAL STABILITY of a fixed signal set. It runs
+    the backtest engine independently on the train slice and on the embargoed
+    test slice of the SAME signals, then compares in-sample to out-of-sample
+    performance. It does NOT re-optimize hyperparameters or signal weights per
+    fold.
 
     This ensures:
-    1. No future data leakage in parameter optimization
-    2. Realistic out-of-sample performance estimates
-    3. Detection of overfitting through train/test performance comparison
+    1. No future data leakage: train and test backtests are fully independent
+       and separated by an embargo gap.
+    2. Realistic out-of-sample performance estimates for the fixed signals.
+    3. Detection of overfitting/instability through train/test comparison and
+       selection-bias-aware Sharpe statistics (probabilistic & deflated Sharpe).
     """
 
     def __init__(
@@ -459,20 +492,28 @@ class WalkForwardValidator:
         self,
         signals: pd.DataFrame,
         prices: pd.DataFrame,
-        optimizer: WeightOptimizer,
         backtest_fn: Callable,
     ) -> List[ValidationResult]:
         """
-        Run walk-forward validation.
+        Run honest time-partition out-of-sample validation of FIXED signals.
+
+        For each expanding-window fold, the (already final) signals are sliced
+        into a train window and an embargoed test window. The backtest engine is
+        run independently on each slice, and the in-sample vs out-of-sample
+        metrics are recorded. This tests the TEMPORAL STABILITY of the fixed
+        signals; it does NOT re-optimize signal weights or any hyperparameter
+        per fold (the signals carry their final per-row weights).
 
         Args:
-            signals: All signals with date column
-            prices: Price data for backtesting
-            optimizer: Weight optimizer to use
-            backtest_fn: Function that runs backtest and returns (sharpe, n_trades, total_return, max_dd)
+            signals: All signals with a 'date' column, carrying final per-row
+                weights. The same signals are used for both train and test
+                slices; only the time window differs.
+            prices: Price data for backtesting.
+            backtest_fn: Function that runs the backtest and returns
+                (sharpe, n_trades, total_return, max_dd).
 
         Returns:
-            List of ValidationResult for each time window
+            List of ValidationResult, one per time window.
         """
         # Ensure date column is datetime
         signals = signals.copy()
@@ -492,19 +533,24 @@ class WalkForwardValidator:
                 f"min_train_months={self.min_train_months} + test_months={self.test_months}"
             )
 
-        print(f"\nWalk-Forward Validation: {len(windows)} folds")
-        print(f"  Training: {self.min_train_months}+ months (expanding)")
-        print(f"  Testing:  {self.test_months} months")
-        print(f"  Embargo:  {self.embargo_days} days")
+        logger.info(
+            "Walk-Forward Validation (temporal stability of fixed signals): "
+            "%d folds | training %d+ months (expanding) | testing %d months | "
+            "embargo %d days",
+            len(windows), self.min_train_months, self.test_months, self.embargo_days,
+        )
 
         results = []
 
         for i, window in enumerate(windows):
-            print(f"\n--- Fold {i+1}/{len(windows)} ---")
-            print(f"  Train: {window.train_start.date()} to {window.train_end.date()}")
-            print(f"  Test:  {window.test_start.date()} to {window.test_end.date()}")
+            logger.info(
+                "Fold %d/%d | train %s to %s | test %s to %s",
+                i + 1, len(windows),
+                window.train_start.date(), window.train_end.date(),
+                window.test_start.date(), window.test_end.date(),
+            )
 
-            # Split data - CRITICAL: no future data in training
+            # Split the FIXED signals by time - CRITICAL: no future data in train
             train_signals = signals[
                 (signals['date'] >= window.train_start) &
                 (signals['date'] < window.train_end)
@@ -515,47 +561,41 @@ class WalkForwardValidator:
                 (signals['date'] < window.test_end)
             ].copy()
 
-            print(f"  Train signals: {len(train_signals)}")
-            print(f"  Test signals:  {len(test_signals)}")
+            logger.info(
+                "Fold %d/%d | train signals: %d | test signals: %d",
+                i + 1, len(windows), len(train_signals), len(test_signals),
+            )
 
             if len(train_signals) < 10:
-                print(f"  SKIPPING: Insufficient training signals")
+                logger.warning("Fold %d/%d skipped: insufficient training signals (%d)",
+                               i + 1, len(windows), len(train_signals))
                 continue
 
             if len(test_signals) < 5:
-                print(f"  SKIPPING: Insufficient test signals")
+                logger.warning("Fold %d/%d skipped: insufficient test signals (%d)",
+                               i + 1, len(windows), len(test_signals))
                 continue
 
-            # Optimize on training data ONLY
-            # Get returns for training period (for correlation-based weighting)
-            train_mask = (
-                (prices.index.get_level_values(0) >= window.train_start) &
-                (prices.index.get_level_values(0) < window.train_end)
-            ) if isinstance(prices.index, pd.MultiIndex) else (
-                (prices.index >= window.train_start) &
-                (prices.index < window.train_end)
-            )
-
-            train_returns = pd.Series([0.0])  # Placeholder if returns not available
-
-            optimal_weights = optimizer.optimize(train_signals, train_returns)
-            print(f"  Optimal weights: {optimal_weights.to_dict()}")
-
-            # Backtest on training data
+            # Backtest the fixed signals on the train window.
             train_sharpe, train_n_trades, train_return, train_dd = backtest_fn(
-                train_signals, prices, optimal_weights.to_dict(),
+                train_signals, prices, {},
                 window.train_start, window.train_end
             )
 
-            # Backtest on test data with SAME weights (no re-optimization)
+            # Backtest the SAME fixed signals on the embargoed test window.
             test_sharpe, test_n_trades, test_return, test_dd = backtest_fn(
-                test_signals, prices, optimal_weights.to_dict(),
+                test_signals, prices, {},
                 window.test_start, window.test_end
             )
 
-            print(f"  Train Sharpe: {train_sharpe:.3f} ({train_n_trades} trades)")
-            print(f"  Test Sharpe:  {test_sharpe:.3f} ({test_n_trades} trades)")
-            print(f"  Overfit Ratio: {test_sharpe/train_sharpe:.2f}" if train_sharpe != 0 else "  Overfit Ratio: N/A")
+            overfit_ratio = test_sharpe / train_sharpe if train_sharpe != 0 else float('nan')
+            logger.info(
+                "Fold %d/%d | train Sharpe %.3f (%d trades) | "
+                "test Sharpe %.3f (%d trades) | overfit ratio %.2f",
+                i + 1, len(windows),
+                train_sharpe, train_n_trades, test_sharpe, test_n_trades,
+                overfit_ratio,
+            )
 
             results.append(ValidationResult(
                 window=window,
@@ -563,7 +603,6 @@ class WalkForwardValidator:
                 test_sharpe=test_sharpe,
                 train_n_trades=train_n_trades,
                 test_n_trades=test_n_trades,
-                optimal_params=optimal_weights.to_dict(),
                 train_return=train_return,
                 test_return=test_return,
                 train_max_drawdown=train_dd,
@@ -673,7 +712,13 @@ def create_backtest_function(
         start_date: datetime,
         end_date: datetime,
     ) -> tuple:
-        """Run backtest and return metrics."""
+        """Run backtest and return metrics.
+
+        The ``weights`` argument is accepted for call-site compatibility but is
+        intentionally unused: the signals already carry their final per-row
+        weights, so the backtest engine consumes them directly. Walk-forward
+        validation passes an empty dict here.
+        """
         try:
             # Filter prices to date range
             if isinstance(prices.index, pd.MultiIndex):
@@ -737,7 +782,7 @@ def create_backtest_function(
             return sharpe, n_trades, total_return, max_dd
 
         except Exception as e:
-            print(f"Backtest error: {e}")
+            logger.error("Backtest error: %s", e, exc_info=True)
             return 0.0, 0, 0.0, 0.0
 
     return backtest_fn

@@ -1,5 +1,10 @@
 """
 Setup script for ESG Event-Driven Alpha Strategy
+
+ARCHIVED / NON-AUTHORITATIVE: This setup.py is retained for historical reference
+only. The canonical, authoritative build and packaging configuration is the
+project-root ``pyproject.toml``. Do NOT use this file to build or install the
+package, and do not treat its metadata, dependency pins, or extras as current.
 """
 
 from setuptools import setup, find_packages

@@ -9,44 +9,46 @@ sanity check that does not depend on live data sources.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta
+import zlib
 
 import numpy as np
 import pandas as pd
-import yaml
 
 from src.backtest import BacktestEngine, PerformanceAnalyzer
 from src.nlp import FinancialSentimentAnalyzer, ReactionFeatureExtractor
 from src.signals import ESGSignalGenerator, PortfolioConstructor
 from src.signals.signal_generator import WeightDerivationMethod
+from src.utils.config_loader import load_config, load_environment
 from src.utils.logging_config import setup_logging
 from src.utils.strategy_config import load_strategy_spec
-
-
-def load_config(config_path: str = "config/config.yaml") -> dict:
-    """Load configuration from YAML file."""
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
 
 
 def _build_mock_prices(
     tickers: list[str],
     dates: pd.DatetimeIndex,
-    event_date: pd.Timestamp,
+    first_event_date: pd.Timestamp,
+    drift_by_ticker: dict[str, float],
 ) -> pd.DataFrame:
-    """Generate deterministic mock prices with post-event drift by ticker bucket."""
-    rows: list[dict] = []
-    midpoint = len(tickers) // 2
+    """Generate deterministic synthetic prices with sentiment-aligned post-event drift.
 
-    for idx, ticker in enumerate(tickers):
-        rng = np.random.default_rng(abs(hash((ticker, len(dates)))) % (2**32))
+    DEMO/synthetic only. The per-ticker post-event drift is aligned to the same
+    long/short sentiment assignment used to build the demo events so that the
+    offline smoke test produces a coherent (not random) tear sheet. Uses a LOCAL
+    ``np.random.default_rng`` seeded deterministically via ``zlib.crc32`` so the
+    output is reproducible across processes (no global RNG mutation).
+    """
+    rows: list[dict] = []
+
+    for idx, ticker in enumerate(dict.fromkeys(tickers)):
+        seed = zlib.crc32(f"{ticker}:{len(dates)}".encode())
+        rng = np.random.default_rng(seed)
         base_price = 80 + idx * 7
-        drift = 0.0012 if idx >= midpoint else -0.0012
+        drift = drift_by_ticker.get(ticker, 0.0)
 
         price = base_price
         for date in dates:
             daily_ret = rng.normal(0.0001, 0.012)
-            if date >= event_date:
+            if date >= first_event_date:
                 daily_ret += drift
             price *= max(1.0 + daily_ret, 0.01)
             rows.append(
@@ -62,6 +64,43 @@ def _build_mock_prices(
     return pd.DataFrame(rows).set_index(["Date", "ticker"]).sort_index()
 
 
+def _build_demo_posts(
+    ticker: str,
+    event_date: pd.Timestamp,
+    n_posts: int,
+    signed_sentiment: float,
+) -> pd.DataFrame:
+    """Build a synthetic social-post frame with an explicit signed sentiment.
+
+    DEMO/synthetic only. We attach a numeric ``sentiment`` column directly so the
+    offline smoke test does not depend on a text lexicon to recover direction:
+    the reaction-feature extractor consumes the pre-scored ``sentiment`` column
+    when present, which makes the long/short split deterministic. Posts span the
+    pre-event baseline through the +3 day post-event window used by the extractor.
+    A LOCAL ``np.random.default_rng`` (crc32-seeded) keeps engagement noise
+    reproducible across processes without mutating the global RNG.
+    """
+    rng = np.random.default_rng(zlib.crc32(f"{ticker}:{event_date}".encode()))
+    # Span [-2, +3] days so there is a pre-event baseline and a post-event window.
+    offsets = np.linspace(-2.0, 3.0, num=n_posts)
+    timestamps = [event_date + pd.Timedelta(days=float(off)) for off in offsets]
+    # Small reproducible jitter around the target sentiment, sign preserved.
+    jitter = rng.normal(0.0, 0.05, size=n_posts)
+    sentiment = np.clip(signed_sentiment + jitter, -1.0, 1.0)
+
+    return pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "text": [f"DEMO synthetic post about {ticker}"] * n_posts,
+            "sentiment": sentiment,
+            "user_followers": rng.integers(500, 50_000, size=n_posts),
+            "retweets": rng.integers(0, 25, size=n_posts),
+            "likes": rng.integers(0, 120, size=n_posts),
+            "ticker": ticker,
+        }
+    )
+
+
 def run_demo(args, config: dict, logger) -> None:
     """Run a deterministic demo aligned to the canonical strategy contract."""
     strategy_spec = load_strategy_spec(config)
@@ -73,20 +112,79 @@ def run_demo(args, config: dict, logger) -> None:
     if end_date <= start_date:
         raise ValueError("end-date must be after start-date")
 
-    tickers = list(dict.fromkeys(args.tickers))
-    while len(tickers) < 10:
-        tickers.extend(tickers)
-        tickers = list(dict.fromkeys(tickers))
-        if len(tickers) >= 10:
-            break
-    tickers = tickers[:10]
+    # INFRA-01: deterministic ticker expansion that allows repeats (no infinite
+    # loop). The unique names drive the demo cross-section; the expansion only
+    # widens the synthetic price universe.
+    base = list(dict.fromkeys(args.tickers))
+    tickers = (base * ((10 // max(len(base), 1)) + 1))[:10]
+    universe = list(dict.fromkeys(tickers))
+
+    # A long/short demo needs at least two distinct names per side. If the caller
+    # supplied too few unique tickers, pad with clearly-labelled synthetic DEMO
+    # names so the offline smoke test always forms a balanced book.
+    min_universe = 4
+    if len(universe) < min_universe:
+        logger.info(
+            "DEMO: padding universe from %d to %d names with synthetic DEMO tickers",
+            len(universe),
+            min_universe,
+        )
+        filler = 1
+        while len(universe) < min_universe:
+            synthetic = f"DEMO{filler}"
+            if synthetic not in universe:
+                universe.append(synthetic)
+            filler += 1
+        tickers = universe[:]
+
+    # INFRA-02: demo-only smoke-test overrides. The canonical 49-calendar-day
+    # holding window over a short demo range yields no balanced book, so the
+    # OFFLINE DEMO path uses a longer date range and a short holding window and
+    # spreads several balanced event "waves" across time. This is clearly
+    # synthetic and must never be read as a production result.
+    demo_holding_period = 14  # calendar days (smoke-test window)
+    demo_rebalance_freq = "W"
+    n_waves = 4
+    min_business_days = 60
+    logger.info(
+        "DEMO (synthetic, offline): holding_period=%d days, rebalance=%s, waves=%d "
+        "-- NOT a production result; use run_production.py for real data",
+        demo_holding_period,
+        demo_rebalance_freq,
+        n_waves,
+    )
 
     dates = pd.date_range(start=start_date, end=end_date, freq="B")
-    if len(dates) < 40:
-        raise ValueError("demo requires at least 40 business days")
-    event_date = dates[min(15, len(dates) // 3)]
+    if len(dates) < min_business_days:
+        # Extend the range deterministically so the smoke test always has enough
+        # room for the rolling window and several event waves.
+        end_date = start_date + pd.Timedelta(days=int(min_business_days * 1.6))
+        dates = pd.date_range(start=start_date, end=end_date, freq="B")
+        logger.info(
+            "DEMO: extended date range to %s -> %s for a stable smoke test",
+            dates[0].date(),
+            dates[-1].date(),
+        )
 
-    prices = _build_mock_prices(tickers, dates, event_date)
+    # Balanced long/short assignment over the unique universe: alternate the
+    # synthetic sentiment so each event wave deterministically contains both
+    # bearish (short) and bullish (long) names.
+    sentiment_by_ticker = {
+        ticker: ("negative" if idx % 2 == 0 else "positive")
+        for idx, ticker in enumerate(universe)
+    }
+    drift_by_ticker = {
+        ticker: (-0.0014 if bias == "negative" else 0.0014)
+        for ticker, bias in sentiment_by_ticker.items()
+    }
+
+    # Event waves spread across the range so the weekly rebalance grid sees a
+    # populated, balanced cross-section at multiple points.
+    wave_positions = np.linspace(10, len(dates) - 10, num=n_waves)
+    wave_dates = [dates[int(round(pos))] for pos in wave_positions]
+    first_event_date = wave_dates[0]
+
+    prices = _build_mock_prices(tickers, dates, first_event_date, drift_by_ticker)
 
     # Demo override: keep the smoke test lightweight and deterministic.
     sentiment_analyzer = FinancialSentimentAnalyzer(mode="simple", strict=False)
@@ -100,35 +198,39 @@ def run_demo(args, config: dict, logger) -> None:
     )
 
     events_data = []
-    midpoint = len(tickers) // 2
-    for idx, ticker in enumerate(tickers):
-        sentiment_bias = "negative" if idx < midpoint else "positive"
-        mock_posts = feature_extractor.create_mock_social_data(
-            ticker=ticker,
-            event_date=event_date.to_pydatetime(),
-            n_tweets=max(strategy_spec.signal.min_posts + 5, 12),
-            sentiment_bias=sentiment_bias,
-        )
-        reaction_features = feature_extractor.extract_features(
-            mock_posts,
-            event_date.to_pydatetime(),
-        )
-        reaction_features["volume_ratio"] = 1.5 + (idx * 0.15)
-        reaction_features["duration_days"] = 2 + (idx % 4)
+    n_posts = max(strategy_spec.signal.min_posts + 5, 12)
+    for wave_idx, wave_date in enumerate(wave_dates):
+        for idx, ticker in enumerate(universe):
+            sentiment_bias = sentiment_by_ticker[ticker]
+            signed_sentiment = -0.6 if sentiment_bias == "negative" else 0.6
+            mock_posts = _build_demo_posts(
+                ticker=ticker,
+                event_date=wave_date,
+                n_posts=n_posts,
+                signed_sentiment=signed_sentiment,
+            )
+            reaction_features = feature_extractor.extract_features(
+                mock_posts,
+                wave_date.to_pydatetime(),
+            )
+            reaction_features["volume_ratio"] = 1.5 + (idx * 0.15)
+            reaction_features["duration_days"] = 2 + (idx % 4)
 
-        events_data.append(
-            {
-                "ticker": ticker,
-                "date": event_date.to_pydatetime(),
-                "event_features": {
-                    "has_event": True,
-                    "category": "E" if idx % 3 == 0 else ("S" if idx % 3 == 1 else "G"),
-                    "confidence": 0.45 + idx * 0.05,
-                    "sentiment": sentiment_bias,
-                },
-                "reaction_features": reaction_features,
-            }
-        )
+            events_data.append(
+                {
+                    "ticker": ticker,
+                    "date": wave_date.to_pydatetime(),
+                    "event_features": {
+                        "has_event": True,
+                        "category": (
+                            "E" if idx % 3 == 0 else ("S" if idx % 3 == 1 else "G")
+                        ),
+                        "confidence": 0.45 + (idx % 5) * 0.05,
+                        "sentiment": sentiment_bias,
+                    },
+                    "reaction_features": reaction_features,
+                }
+            )
 
     signals_df = signal_generator.generate_signals_batch(
         events_data,
@@ -152,8 +254,8 @@ def run_demo(args, config: dict, logger) -> None:
         method=strategy_spec.portfolio.method,
         selection_balance=strategy_spec.portfolio.selection_balance,
         exposure_model=strategy_spec.portfolio.exposure_model,
-        window_days=strategy_spec.portfolio.holding_period,
-        rebalance_freq=strategy_spec.portfolio.rebalance_frequency,
+        window_days=demo_holding_period,
+        rebalance_freq=demo_rebalance_freq,
     )
     portfolio = portfolio_constructor.apply_position_limits(
         portfolio,
@@ -186,8 +288,8 @@ def run_demo(args, config: dict, logger) -> None:
     )
     results = engine.run(
         signals=portfolio,
-        rebalance_freq=strategy_spec.portfolio.rebalance_frequency,
-        holding_period=strategy_spec.portfolio.holding_period,
+        rebalance_freq=demo_rebalance_freq,
+        holding_period=10,  # DEMO: ~10 trading days, matched to the smoke window
     )
 
     logger.info("Demo final value: $%0.2f", results.get_final_value())
@@ -234,6 +336,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    load_environment()
     config = load_config(args.config)
     logger = setup_logging(
         log_level=config["logging"]["level"],

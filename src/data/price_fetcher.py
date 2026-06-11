@@ -3,18 +3,25 @@ Price Data Fetcher
 Fetches historical price data for stocks
 """
 
+import logging
+import zlib
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import time
 
+from src.utils.provenance import REAL, MOCK, tag, DataUnavailableError
+
+logger = logging.getLogger(__name__)
+
 try:
     import yfinance as yf
     YFINANCE_AVAILABLE = True
 except ImportError:
     YFINANCE_AVAILABLE = False
-    print("Warning: yfinance not available. Install with: pip install yfinance")
+    logger.warning("yfinance not available. Install with: pip install yfinance")
 
 
 class PriceFetcher:
@@ -22,14 +29,20 @@ class PriceFetcher:
     Fetches historical stock price data
     """
 
-    def __init__(self, data_folder: str = "./data/processed/prices"):
+    def __init__(self, data_folder: str = "./data/processed/prices",
+                 use_mock: bool = False):
         """
         Initialize price fetcher
 
         Args:
             data_folder: Where to cache price data
+            use_mock: When True, intentionally return synthetic (demo/test)
+                price data stamped MOCK. When False (production default),
+                a real fetch failure raises DataUnavailableError instead of
+                silently fabricating data.
         """
         self.data_folder = data_folder
+        self.use_mock = use_mock
 
     def fetch_price_data(self, tickers: List[str], start_date: str,
                         end_date: str, interval: str = '1d',
@@ -48,12 +61,20 @@ class PriceFetcher:
         Returns:
             DataFrame with multi-index (date, ticker) and columns (Open, High, Low, Close, Volume, Adj Close)
         """
+        if self.use_mock:
+            logger.warning("use_mock=True: generating SYNTHETIC mock price data (demo mode).")
+            mock_df = self._generate_mock_prices(tickers, start_date, end_date, signals_df)
+            return tag(mock_df, MOCK, "yfinance_mock")
+
         if not YFINANCE_AVAILABLE:
-            print("yfinance not available. Generating mock price data.")
-            return self._generate_mock_prices(tickers, start_date, end_date, signals_df)
+            raise DataUnavailableError(
+                "PriceFetcher: yfinance is not installed but use_mock=False. "
+                "Install yfinance (pip install yfinance) or construct "
+                "PriceFetcher(use_mock=True) for a labelled demo run."
+            )
 
         # Try batch download first (more reliable)
-        print(f"Fetching price data for {len(tickers)} tickers via batch download...")
+        logger.info(f"Fetching price data for {len(tickers)} tickers via batch download...")
 
         all_data = []
         batch_size = 10  # Download in batches to avoid rate limits
@@ -123,8 +144,12 @@ class PriceFetcher:
                     continue
 
         if not all_data:
-            print("No data fetched from yfinance. Generating mock data.")
-            return self._generate_mock_prices(tickers, start_date, end_date, signals_df)
+            raise DataUnavailableError(
+                f"PriceFetcher: no price data returned from yfinance for "
+                f"{len(tickers)} ticker(s) after {max_retries} retries per batch "
+                f"({start_date} to {end_date}). Refusing to fabricate data on a "
+                f"production (use_mock=False) run."
+            )
 
         # Combine all data
         combined_df = pd.concat(all_data, ignore_index=True)
@@ -142,7 +167,7 @@ class PriceFetcher:
         print(f"✓ Fetched REAL price data for {combined_df.index.get_level_values('ticker').nunique()} tickers")
         print(f"  Date range: {combined_df.index.get_level_values('Date').min()} to {combined_df.index.get_level_values('Date').max()}")
 
-        return combined_df
+        return tag(combined_df, REAL, "yfinance")
 
     def _generate_mock_prices(self, tickers: List[str], start_date: str,
                              end_date: str, signals_df: pd.DataFrame = None) -> pd.DataFrame:
@@ -166,7 +191,10 @@ class PriceFetcher:
         Returns:
             DataFrame with mock price data
         """
-        dates = pd.date_range(start=start_date, end=end_date, freq='D')
+        # Business days only, so synthetic (demo) prices share the trading-day
+        # calendar the backtest engine's weekly rebalance grid assumes; calendar
+        # days (incl. weekends) would desync that grid from real-data behavior.
+        dates = pd.date_range(start=start_date, end=end_date, freq='B')
 
         # Create signal lookup dictionary for fast access
         signal_lookup = {}
@@ -184,8 +212,10 @@ class PriceFetcher:
         all_data = []
 
         for ticker in tickers:
-            # Generate random walk prices with signal correlation
-            np.random.seed(hash(ticker) % 2**32)
+            # Generate random walk prices with signal correlation.
+            # Local deterministic generator (no global RNG mutation, stable
+            # across processes); only reachable on the explicit mock path.
+            rng = np.random.default_rng(zlib.crc32(ticker.encode()))
 
             base_price = 100
             returns = []
@@ -204,10 +234,10 @@ class PriceFetcher:
                     expected_return = (quintile - 3) * 0.001
 
                     # Generate return with adjusted mean
-                    daily_return = np.random.normal(expected_return, 0.02)
+                    daily_return = rng.normal(expected_return, 0.02)
                 else:
                     # No signal - random walk with slight positive drift
-                    daily_return = np.random.normal(0.0005, 0.02)
+                    daily_return = rng.normal(0.0005, 0.02)
 
                 returns.append(daily_return)
 
@@ -217,11 +247,11 @@ class PriceFetcher:
             df = pd.DataFrame({
                 'Date': dates,
                 'ticker': ticker,
-                'Open': prices * (1 + np.random.normal(0, 0.01, len(dates))),
-                'High': prices * (1 + abs(np.random.normal(0.01, 0.01, len(dates)))),
-                'Low': prices * (1 - abs(np.random.normal(0.01, 0.01, len(dates)))),
+                'Open': prices * (1 + rng.normal(0, 0.01, len(dates))),
+                'High': prices * (1 + abs(rng.normal(0.01, 0.01, len(dates)))),
+                'Low': prices * (1 - abs(rng.normal(0.01, 0.01, len(dates)))),
                 'Close': prices,
-                'Volume': np.random.randint(1000000, 10000000, len(dates)),
+                'Volume': rng.integers(1000000, 10000000, len(dates)),
                 'Adj Close': prices
             })
 

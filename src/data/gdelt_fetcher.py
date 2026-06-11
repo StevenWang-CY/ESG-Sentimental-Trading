@@ -9,6 +9,9 @@ It provides article tone/sentiment, source URLs, and full text snippets.
 API docs: https://blog.gdeltproject.org/gdelt-doc-2-0-api-version-2/
 """
 
+import logging
+import zlib
+
 import requests
 import pandas as pd
 import numpy as np
@@ -21,8 +24,17 @@ from src.data.reddit_fetcher import (
     truncate_text_safely,
     compute_esg_relevance,
 )
+from src.utils.provenance import REAL, MOCK, EMPTY, tag
+
+logger = logging.getLogger(__name__)
 
 GDELT_DOC_API = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+# Standard output column schema shared by all sentiment/news fetchers.
+STANDARD_COLUMNS = [
+    'timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
+    'sentiment', 'esg_relevance', 'esg_category', 'quality_score',
+]
 
 
 class GDELTFetcher:
@@ -53,6 +65,12 @@ class GDELTFetcher:
         self.use_mock = use_mock
         self.request_timeout = request_timeout
         self.max_articles = max_articles
+
+        # DATA-06: GDELT artlist mode does not return a per-article numeric
+        # 'tone' field, so the tone-based sentiment fallback is unreachable.
+        # When the FinBERT analyzer is absent we leave sentiment at a documented
+        # neutral 0.0 and emit a single warning (gated by this flag).
+        self._tone_fallback_warned = False
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -92,17 +110,27 @@ class GDELTFetcher:
         }
 
         if not use_mock:
+            # A failed/non-200 probe must NOT flip us into mock mode on a
+            # production fetch. Log and continue; per-event fetches fail closed
+            # on their own by returning EMPTY-stamped frames.
             try:
                 test_url = f"{GDELT_DOC_API}?query=test&format=json&maxrecords=1&mode=artlist"
                 resp = self.session.get(test_url, timeout=10)
                 if resp.status_code == 200:
                     print("GDELT DOC API connected successfully (no credentials needed)")
                 else:
-                    print(f"Warning: GDELT API returned status {resp.status_code}")
-                    self.use_mock = True
+                    logger.warning(
+                        "GDELT API returned status %s during init probe. "
+                        "Continuing in real-data mode; per-event fetches will "
+                        "return empty if the API stays unavailable.",
+                        resp.status_code
+                    )
             except Exception as e:
-                print(f"Warning: GDELT API unreachable ({e}), falling back to mock")
-                self.use_mock = True
+                logger.warning(
+                    "GDELT API unreachable during init probe: %s. Continuing in "
+                    "real-data mode; per-event fetches will return empty if the "
+                    "API stays unreachable.", e
+                )
 
     def _search_articles(self, query: str, start_date: datetime,
                          end_date: datetime, max_records: int = 50) -> List[Dict]:
@@ -169,7 +197,11 @@ class GDELTFetcher:
             DataFrame with columns matching ArcticShiftFetcher output
         """
         if self.use_mock:
-            return self._generate_mock_posts(ticker, event_date, days_before, days_after, max_results)
+            # Intentional demo/test mode: synthetic data, loudly stamped MOCK.
+            mock_df = self._generate_mock_posts(
+                ticker, event_date, days_before, days_after, max_results
+            )
+            return tag(mock_df, MOCK, source='gdelt_mock')
 
         start_time = event_date - timedelta(days=days_before)
         end_time = event_date + timedelta(days=days_after)
@@ -214,7 +246,6 @@ class GDELTFetcher:
                 seendate = article.get('seendate', '')
                 domain = article.get('domain', '')
                 language = article.get('language', '')
-                tone = article.get('tone', 0)
                 source_country = article.get('sourcecountry', '')
 
                 # Skip non-English articles
@@ -239,18 +270,33 @@ class GDELTFetcher:
                     post_text, ticker
                 )
 
-                # Compute sentiment
+                # Compute sentiment.
+                # DATA-06: GDELT's artlist mode does NOT return a per-article
+                # numeric 'tone' field (tone is only available in tonechart /
+                # timelinevoltone modes), so there is no usable tone-based
+                # fallback here. GDELT sentiment therefore REQUIRES the FinBERT
+                # analyzer; when it is absent we leave sentiment at a documented
+                # neutral 0.0 and warn exactly once.
                 sentiment_score = 0.0
                 if self.sentiment_analyzer and post_text:
                     try:
                         result = self.sentiment_analyzer.analyze_single(post_text)
                         sentiment_score = self.sentiment_analyzer.score_to_numeric(result)
-                    except Exception:
-                        # Fall back to GDELT tone (range: -100 to +100)
-                        if tone:
-                            sentiment_score = max(min(float(tone) / 10.0, 1.0), -1.0)
-                elif tone:
-                    sentiment_score = max(min(float(tone) / 10.0, 1.0), -1.0)
+                    except Exception as e:
+                        # Analyzer present but failed on this article: neutral 0.0.
+                        logger.warning(
+                            "GDELT: sentiment analysis failed for an article "
+                            "(%s); using neutral 0.0", e
+                        )
+                        sentiment_score = 0.0
+                elif not self._tone_fallback_warned:
+                    logger.warning(
+                        "GDELT tone fallback is unavailable in artlist mode "
+                        "(no per-article 'tone' field); article sentiment will "
+                        "default to neutral 0.0 because the FinBERT analyzer is "
+                        "not loaded."
+                    )
+                    self._tone_fallback_warned = True
 
                 # Quality score based on source domain reputation
                 source_quality = 0.5
@@ -284,11 +330,12 @@ class GDELTFetcher:
 
             time.sleep(0.5)  # Rate limit: ~2 requests/second
 
+        # SOFT no-data: a real fetch that legitimately returned no articles.
+        # Return an EMPTY-stamped frame with the standard schema; never fabricate.
         if not posts_data:
-            return pd.DataFrame(columns=[
-                'timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
-                'sentiment', 'esg_relevance', 'esg_category', 'quality_score',
-            ])
+            logger.warning("GDELT: no articles found for %s", ticker)
+            empty = pd.DataFrame(columns=STANDARD_COLUMNS)
+            return tag(empty, EMPTY, source='gdelt')
 
         df = pd.DataFrame(posts_data)
 
@@ -299,32 +346,36 @@ class GDELTFetcher:
         print(f"  GDELT: {len(df)} articles from {n_domains} sources for {ticker}")
         print(f"    ESG-relevant: {esg_count}/{len(df)} | Avg sentiment: {avg_sentiment:+.2f}")
 
-        return df[['timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker',
-                    'sentiment', 'esg_relevance', 'esg_category', 'quality_score']]
+        result = df[STANDARD_COLUMNS]
+        return tag(result, REAL, source='gdelt')
 
     def _generate_mock_posts(self, ticker: str, event_date: datetime,
                               days_before: int, days_after: int,
                               max_results: int) -> pd.DataFrame:
-        """Generate mock news articles for testing."""
-        np.random.seed(hash(f"{ticker}_{event_date}") % 2**31)
-        n = min(np.random.randint(5, 20), max_results)
+        """Generate mock news articles for testing.
+
+        Only reachable when use_mock=True. Uses a LOCAL deterministic generator
+        (no global np.random.seed mutation) keyed on ticker+event via crc32.
+        """
+        rng = np.random.default_rng(zlib.crc32(f"{ticker}_{event_date}".encode()))
+        n = min(int(rng.integers(5, 20)), max_results)
 
         data = []
         for i in range(n):
-            offset = np.random.randint(-days_before, days_after + 1)
-            ts = event_date + timedelta(days=offset, hours=np.random.randint(0, 24))
-            sentiment = np.random.uniform(-0.8, 0.8)
+            offset = int(rng.integers(-days_before, days_after + 1))
+            ts = event_date + timedelta(days=offset, hours=int(rng.integers(0, 24)))
+            sentiment = rng.uniform(-0.8, 0.8)
             data.append({
                 'timestamp': ts,
                 'text': f"Mock GDELT article about {ticker} ESG event {i}",
                 'user_followers': 1,
                 'retweets': 0,
-                'likes': np.random.randint(50, 100),
+                'likes': int(rng.integers(50, 100)),
                 'ticker': ticker,
                 'sentiment': round(sentiment, 3),
-                'esg_relevance': np.random.uniform(0.1, 0.8),
-                'esg_category': np.random.choice(['E', 'S', 'G']),
-                'quality_score': np.random.uniform(0.3, 0.9),
+                'esg_relevance': rng.uniform(0.1, 0.8),
+                'esg_category': rng.choice(['E', 'S', 'G']),
+                'quality_score': rng.uniform(0.3, 0.9),
             })
 
         return pd.DataFrame(data)

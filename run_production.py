@@ -22,8 +22,9 @@ Cache Control:
 """
 
 import argparse
-import yaml
+import json
 import logging
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 import pandas as pd
@@ -33,7 +34,12 @@ import sys
 from src.utils.logging_config import setup_logging
 from src.utils.strategy_config import load_strategy_spec
 from src.utils.date_validator import DateValidator
-from src.utils.cache_manager import compute_config_hash, is_cache_fresh, build_cache_key
+from src.utils.cache_manager import (
+    compute_config_hash, is_cache_fresh, build_cache_key,
+    is_cache_trusted, mark_cache_provenance,
+)
+from src.utils.config_loader import load_config as _load_config_env, resolve_credential
+from src.utils.provenance import guard_real, get_provenance, DataUnavailableError, REAL
 from src.data import SECDownloader, PriceFetcher, FamaFrenchFactors, TwitterFetcher, RedditFetcher, ArcticShiftFetcher, GDELTFetcher, StockTwitsFetcher, MultiSourceFetcher
 from src.data.universe_fetcher import UniverseFetcher
 from src.preprocessing import SECFilingParser, TextCleaner
@@ -44,10 +50,57 @@ from src.backtest import BacktestEngine, PerformanceAnalyzer, FactorAnalysis
 
 
 def load_config(config_path: str = 'config/config.yaml'):
-    """Load configuration from YAML file"""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+    """Load configuration from YAML.
+
+    Delegates to ``src.utils.config_loader.load_config`` which loads ``.env``
+    and expands ``${ENV_VAR}`` placeholders so credentials resolve correctly
+    (a bare ``yaml.safe_load`` used to leave the literal ``${REDDIT_CLIENT_ID}``
+    string in place, defeating the credential gate).
+    """
+    return _load_config_env(config_path)
+
+
+def _git_commit() -> str:
+    """Return the current short git commit hash, or 'nogit' if unavailable."""
+    try:
+        out = subprocess.run(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            capture_output=True, text=True, timeout=5,
+        )
+        commit = out.stdout.strip()
+        return commit or 'nogit'
+    except Exception:
+        return 'nogit'
+
+
+def _write_equity_csv(results, path: Path, benchmark_returns=None) -> int:
+    """Persist the per-period equity / returns / drawdown / exposure series.
+
+    This is the time series the dashboard plots (equity curve, underwater
+    drawdown, rolling exposure). run_production previously persisted only the
+    scalar tear sheet, so no series existed to chart. Returns the row count.
+    """
+    equity = results.get_equity_curve()
+    if equity is None or equity.empty:
+        return 0
+    daily_ret = results.get_daily_returns()
+    drawdown = results.get_drawdown_series()
+    exposure = results.get_exposure_series()
+
+    df = pd.DataFrame({'equity': equity})
+    df.index.name = 'date'
+    df['daily_return'] = daily_ret.reindex(df.index) if daily_ret is not None else 0.0
+    df['drawdown'] = drawdown.reindex(df.index) if drawdown is not None else 0.0
+    if exposure is not None and not exposure.empty:
+        df['gross_exposure'] = exposure['gross_exposure'].reindex(df.index)
+        df['net_exposure'] = exposure['net_exposure'].reindex(df.index)
+    if benchmark_returns is not None and len(benchmark_returns) > 0:
+        bench = benchmark_returns.reindex(df.index).fillna(0.0)
+        df['benchmark_cum'] = (1.0 + bench).cumprod()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.reset_index().to_csv(path, index=False)
+    return len(df)
 
 
 def validate_social_media_config(config):
@@ -112,8 +165,11 @@ def validate_social_media_config(config):
             print("="*60 + "\n")
             return False, 'reddit'
 
-        client_id = reddit_config.get('client_id', '')
-        client_secret = reddit_config.get('client_secret', '')
+        # Resolve credentials the same way RedditFetcher does: treat an
+        # unexpanded ${...} placeholder or empty value as unset and fall back
+        # to the environment (.env already loaded by load_config).
+        client_id = resolve_credential(reddit_config.get('client_id'), 'REDDIT_CLIENT_ID')
+        client_secret = resolve_credential(reddit_config.get('client_secret'), 'REDDIT_CLIENT_SECRET')
         if not client_id or not client_secret:
             print("\n" + "="*60)
             print("ERROR: No Reddit API credentials configured")
@@ -139,8 +195,8 @@ def validate_social_media_config(config):
             print("="*60 + "\n")
             return False, 'twitter'
 
-        bearer_token = twitter_config.get('bearer_token', '')
-        if not bearer_token or bearer_token == '':
+        bearer_token = resolve_credential(twitter_config.get('bearer_token'), 'TWITTER_BEARER_TOKEN')
+        if not bearer_token:
             print("\n" + "="*60)
             print("ERROR: No Twitter Bearer Token configured")
             print("="*60)
@@ -187,8 +243,17 @@ def main():
                        help='Force real social media API (override mock mode)')
     parser.add_argument('--social-source', type=str, choices=['reddit', 'twitter', 'arctic_shift', 'gdelt', 'stocktwits', 'multi_source'],
                        help='Override social media source (multi_source, arctic_shift, gdelt, stocktwits, reddit, twitter)')
+    parser.add_argument('--allow-mock', action='store_true',
+                       help='DEMO ONLY: permit synthetic/mock data when real sources are '
+                            'unavailable. Default False = fail-closed (a real run aborts rather '
+                            'than fabricating data). Runs are tagged with data provenance.')
+    parser.add_argument('--seed', type=int, default=42,
+                       help='RNG seed recorded in run metadata for reproducibility')
 
     args = parser.parse_args()
+    # Fail-closed by default: production never fabricates data. Mock generation
+    # is reachable ONLY behind the explicit --allow-mock flag (clearly a demo).
+    allow_mock = args.allow_mock
 
     # Load configuration
     config = load_config(args.config)
@@ -329,7 +394,8 @@ def main():
 
         sec_downloader = SECDownloader(
             company_name=config['data']['sec']['company_name'],
-            email=config['data']['sec']['email']
+            email=config['data']['sec']['email'],
+            use_mock=allow_mock,
         )
 
         all_filings = []
@@ -376,9 +442,12 @@ def main():
         ticker_count=len(tickers)
     )
 
-    # Try to load from cache (check freshness for recent data)
+    # Try to load from cache (check freshness AND data provenance for recent data).
+    # is_cache_trusted refuses legacy marker-less caches and any mock-tagged cache,
+    # so a single outage that once wrote synthetic prices can never poison future runs.
     if (prices_cache_file.exists() and args.use_cache and not args.force_refresh and
-        is_cache_fresh(prices_cache_file, args.end_date, max_age_days=60)):
+        is_cache_fresh(prices_cache_file, args.end_date, max_age_days=60) and
+        is_cache_trusted(prices_cache_file)):
         logger.info(f"✓ Loading cached price data from {prices_cache_file.name}")
         prices = pd.read_pickle(prices_cache_file)
         logger.info(f"Loaded {len(prices)} rows of cached price data")
@@ -388,33 +457,43 @@ def main():
             logger.info("Force refresh enabled - fetching fresh price data from yfinance")
         elif not prices_cache_file.exists():
             logger.info("No cache found - fetching from yfinance")
+        elif not is_cache_trusted(prices_cache_file):
+            logger.info("Cached prices lack a real-data provenance marker - refetching from yfinance")
         else:
             logger.info("Cache stale - fetching fresh price data from yfinance")
 
-        price_fetcher = PriceFetcher()
+        price_fetcher = PriceFetcher(use_mock=allow_mock)
         prices = price_fetcher.fetch_price_data(
             tickers=tickers,
             start_date=extended_start,
             end_date=extended_end
         )
 
-        logger.info(f"Fetched price data: {len(prices)} rows")
+        # Fail closed: never backtest on synthetic/empty prices on a real run.
+        if not allow_mock:
+            guard_real(prices, 'STEP 3: price data')
+        logger.info(f"Fetched price data: {len(prices)} rows (provenance={get_provenance(prices)})")
 
-        # Save to cache if requested
-        if args.save_data or args.use_cache:
+        # Save to cache if requested. Only cache REAL data, and stamp provenance
+        # so the cache is trustworthy on the next run.
+        if (args.save_data or args.use_cache) and get_provenance(prices) == REAL:
             prices_cache_file.parent.mkdir(parents=True, exist_ok=True)
             prices.to_pickle(prices_cache_file)
+            mark_cache_provenance(prices_cache_file, REAL)
             logger.info(f"Saved prices to {prices_cache_file.name}")
 
     # Step 4: Load Fama-French factors
     logger.info("\n>>> STEP 4: LOADING FAMA-FRENCH FACTORS")
-    ff_factors = FamaFrenchFactors()
+    ff_factors = FamaFrenchFactors(use_mock=allow_mock)
     factors = ff_factors.load_ff_factors(
         start_date=extended_start,
         end_date=extended_end,
         frequency='daily'
     )
-    logger.info(f"Loaded {len(factors)} periods of factor data")
+    # Fail closed: the alpha/factor regression must never run on synthetic factors.
+    if not allow_mock:
+        guard_real(factors, 'STEP 4: Fama-French factors')
+    logger.info(f"Loaded {len(factors)} periods of factor data (provenance={get_provenance(factors)})")
 
     # Step 5: Event Detection & Sentiment Analysis
     source_name = {
@@ -506,11 +585,12 @@ def main():
                 sentiment_mode=strategy_spec.sentiment.mode,
                 sentiment_model_name=strategy_spec.sentiment.model_name,
                 strict_sentiment=strategy_spec.sentiment.strict,
+                use_mock=allow_mock,
             )
         elif social_source == 'arctic_shift':
             arctic_config = config['data'].get('arctic_shift', {})
             social_media_fetcher = ArcticShiftFetcher(
-                use_mock=arctic_config.get('use_mock', False),
+                use_mock=allow_mock,
                 subreddits=arctic_config.get('subreddits', None),
                 request_timeout=arctic_config.get('request_timeout', 15),
                 sentiment_mode=strategy_spec.sentiment.mode,
@@ -520,7 +600,7 @@ def main():
         elif social_source == 'gdelt':
             gdelt_config = config['data'].get('gdelt', {})
             social_media_fetcher = GDELTFetcher(
-                use_mock=gdelt_config.get('use_mock', False),
+                use_mock=allow_mock,
                 request_timeout=gdelt_config.get('request_timeout', 30),
                 max_articles=gdelt_config.get('max_articles', 50),
                 sentiment_mode=strategy_spec.sentiment.mode,
@@ -530,7 +610,7 @@ def main():
         elif social_source == 'stocktwits':
             stocktwits_config = config['data'].get('stocktwits', {})
             social_media_fetcher = StockTwitsFetcher(
-                use_mock=stocktwits_config.get('use_mock', False),
+                use_mock=allow_mock,
                 request_timeout=stocktwits_config.get('request_timeout', 15),
                 max_pages=stocktwits_config.get('max_pages', 5),
                 sentiment_mode=strategy_spec.sentiment.mode,
@@ -540,10 +620,10 @@ def main():
         elif social_source == 'reddit':
             reddit_config = config['data']['reddit']
             social_media_fetcher = RedditFetcher(
-                client_id=reddit_config.get('client_id'),
-                client_secret=reddit_config.get('client_secret'),
+                client_id=resolve_credential(reddit_config.get('client_id'), 'REDDIT_CLIENT_ID'),
+                client_secret=resolve_credential(reddit_config.get('client_secret'), 'REDDIT_CLIENT_SECRET'),
                 user_agent=reddit_config.get('user_agent', 'ESG Sentiment Trading Bot 1.0'),
-                use_mock=reddit_config.get('use_mock', True),
+                use_mock=allow_mock,
                 sentiment_mode=strategy_spec.sentiment.mode,
                 sentiment_model_name=strategy_spec.sentiment.model_name,
                 strict_sentiment=strategy_spec.sentiment.strict,
@@ -551,8 +631,8 @@ def main():
         else:  # twitter
             twitter_config = config['data']['twitter']
             social_media_fetcher = TwitterFetcher(
-                bearer_token=twitter_config.get('bearer_token') if not twitter_config.get('use_mock') else None,
-                use_mock=twitter_config.get('use_mock', True)
+                bearer_token=resolve_credential(twitter_config.get('bearer_token'), 'TWITTER_BEARER_TOKEN'),
+                use_mock=allow_mock,
             )
 
         if use_real_data:
@@ -745,10 +825,11 @@ def main():
     logger.info(f"Generated {len(signals_df)} trading signals")
     logger.info(f"Quintile distribution: {signals_df['quintile'].value_counts().sort_index().to_dict()}")
 
-    if args.save_data:
-        signals_file = f"data/signals_{args.start_date}_to_{args.end_date}.csv"
-        signals_df.to_csv(signals_file, index=False)
-        logger.info(f"Saved signals to {signals_file}")
+    # Always persist signals so the dashboard / run record can read them.
+    signals_file = f"data/signals_{args.start_date}_to_{args.end_date}.csv"
+    Path('data').mkdir(parents=True, exist_ok=True)
+    signals_df.to_csv(signals_file, index=False)
+    logger.info(f"Saved signals to {signals_file}")
 
     # Step 7: Portfolio Construction
     logger.info("\n>>> STEP 7: PORTFOLIO CONSTRUCTION")
@@ -787,10 +868,12 @@ def main():
         logger.warning("No positions in portfolio. Cannot run backtest.")
         return
 
-    if args.save_data:
-        portfolio_file = f"data/portfolio_{args.start_date}_to_{args.end_date}.csv"
-        portfolio.to_csv(portfolio_file, index=False)
-        logger.info(f"Saved portfolio to {portfolio_file}")
+    # Always persist the portfolio so the dashboard holdings / proposed-orders
+    # views and the run record can read it.
+    portfolio_file = f"data/portfolio_{args.start_date}_to_{args.end_date}.csv"
+    Path('data').mkdir(parents=True, exist_ok=True)
+    portfolio.to_csv(portfolio_file, index=False)
+    logger.info(f"Saved portfolio to {portfolio_file}")
 
     # Run backtest
     logger.info("\n>>> STEP 8: BACKTESTING")
@@ -857,22 +940,33 @@ def main():
     logger.info(f"Final value: ${results.get_final_value():,.2f}")
     logger.info(f"Total return: {results.get_total_return()*100:.2f}%")
 
+    # Persist the per-period equity / returns / drawdown / exposure series so the
+    # dashboard can plot the equity curve, underwater drawdown, and exposure.
+    equity_file = f"data/equity_{args.start_date}_to_{args.end_date}.csv"
+    equity_rows = _write_equity_csv(results, Path(equity_file), benchmark_returns=cash_benchmark_returns)
+    logger.info(f"Saved equity series ({equity_rows} rows) to {equity_file}")
+
     # Step 9: Performance Analysis
     logger.info("\n>>> STEP 9: PERFORMANCE ANALYSIS")
 
     perf_analyzer = PerformanceAnalyzer(results)
     perf_analyzer.print_tear_sheet()
 
-    # Save tear sheet
-    if args.save_data:
-        tearsheet_file = f"results/tear_sheets/tearsheet_{args.start_date}_to_{args.end_date}.txt"
-        Path("results/tear_sheets").mkdir(parents=True, exist_ok=True)
-        perf_analyzer.save_tear_sheet(tearsheet_file)
-        logger.info(f"\nSaved tear sheet to {tearsheet_file}")
+    # Canonical FLAT metrics dict (single source of truth for the run JSON,
+    # the dashboard, and the post-backtest validator).
+    flat_metrics = perf_analyzer.flatten()
+
+    # Always save the tear sheet (small, per-run, needed by the dashboard).
+    tearsheet_file = f"results/tear_sheets/tearsheet_{args.start_date}_to_{args.end_date}.txt"
+    Path("results/tear_sheets").mkdir(parents=True, exist_ok=True)
+    perf_analyzer.save_tear_sheet(tearsheet_file)
+    logger.info(f"\nSaved tear sheet to {tearsheet_file}")
 
     # Step 10: Factor Analysis
     logger.info("\n>>> STEP 10: FACTOR ANALYSIS")
 
+    factor_status = 'COMPLETE'
+    factor_record = {}
     try:
         factor_analyzer = FactorAnalysis()
         factor_analyzer.load_factors(factors)  # Load factors first
@@ -883,9 +977,16 @@ def main():
         logger.info("\n" + "="*60)
         logger.info("FAMA-FRENCH FACTOR REGRESSION")
         logger.info("="*60)
-        logger.info(f"Annualized Alpha: {factor_results['alpha_annualized']*100:.2f}%")
-        logger.info(f"T-Statistic: {factor_results['alpha_tstat']:.2f}")
+        logger.info(f"Annualized Alpha: {factor_results['alpha_annual']*100:.2f}%")
+        logger.info(f"Alpha SE (annual): {factor_results.get('alpha_se_annual', 0.0)*100:.2f}%")
+        logger.info(
+            f"Alpha 95% CI: [{factor_results.get('alpha_ci_95_low', 0.0)*100:.2f}%, "
+            f"{factor_results.get('alpha_ci_95_high', 0.0)*100:.2f}%]"
+        )
+        logger.info(f"T-Statistic ({factor_results.get('cov_type', 'OLS')}): {factor_results['alpha_tstat']:.2f}")
         logger.info(f"P-Value: {factor_results['alpha_pvalue']:.4f}")
+        if 'nw_lags' in factor_results:
+            logger.info(f"Newey-West Lags: {factor_results['nw_lags']}")
 
         if factor_results['alpha_pvalue'] < 0.05:
             logger.info("\n✓ SIGNIFICANT ALPHA (p < 0.05)")
@@ -893,9 +994,26 @@ def main():
             logger.info("\n⚠ Alpha not statistically significant")
 
         logger.info("\nFactor Loadings:")
-        for factor, coef in factor_results['coefficients'].items():
-            if factor != 'alpha':
-                logger.info(f"  {factor}: {coef:.3f}")
+        beta_tstats = factor_results.get('beta_tstats', {})
+        for factor, coef in factor_results.get('betas', {}).items():
+            tstat_str = f" (t={beta_tstats[factor]:.2f})" if factor in beta_tstats else ""
+            logger.info(f"  {factor}: {coef:.3f}{tstat_str}")
+        logger.info(f"R²: {factor_results.get('r_squared', 0.0):.3f} "
+                    f"(adj: {factor_results.get('adj_r_squared', 0.0):.3f}), "
+                    f"N={factor_results.get('n_observations', 0)}")
+
+        # Serializable factor block for the run JSON (drop residuals/summary objects).
+        factor_record = {
+            'alpha_annual': float(factor_results.get('alpha_annual', 0.0)),
+            'alpha_tstat': float(factor_results.get('alpha_tstat', 0.0)),
+            'alpha_pvalue': float(factor_results.get('alpha_pvalue', 1.0)),
+            'betas': {k: float(v) for k, v in factor_results.get('betas', {}).items()},
+            'r_squared': float(factor_results.get('r_squared', 0.0)),
+            'cov_type': factor_results.get('cov_type', 'OLS'),
+            'nw_lags': factor_results.get('nw_lags'),
+            'n_observations': int(factor_results.get('n_observations', 0)),
+            'factors_provenance': get_provenance(factors),
+        }
 
         if args.save_data:
             factor_file = f"results/factor_analysis/factors_{args.start_date}_to_{args.end_date}.pkl"
@@ -904,19 +1022,111 @@ def main():
             logger.info(f"\nSaved factor analysis to {factor_file}")
 
     except Exception as e:
-        logger.error(f"Factor analysis failed: {e}")
+        # Surface (do not swallow) failures in the headline-claim stage: mark the
+        # run status invalid so the final summary and exit code reflect it.
+        factor_status = 'FACTOR_ANALYSIS_INVALID'
+        logger.error(f"Factor analysis failed: {e}", exc_info=True)
+
+    # Post-backtest validation against the canonical FLAT metrics (DRIFT-01 fix:
+    # the validator now reads the flat run record, not the nested tear sheet).
+    validation_passed = True
+    validation_issues = []
+    try:
+        from scripts.validate_backtest import BacktestValidator
+        validator = BacktestValidator(config_path=args.config)
+        pre_ok, pre_issues = validator.run_pre_flight_checks(universe_size=len(tickers))
+        post_ok, post_issues = validator.validate_backtest_results(flat_metrics)
+        validation_passed = bool(pre_ok and post_ok)
+        validation_issues = list(pre_issues) + list(post_issues)
+    except Exception as e:
+        logger.warning(f"Post-backtest validation could not run: {e}")
+        validation_passed = False
+        validation_issues = [f"validator_error: {e}"]
+
+    # Overall run status (drives the summary banner and process exit code).
+    if factor_status == 'FACTOR_ANALYSIS_INVALID':
+        status = 'FACTOR_ANALYSIS_INVALID'
+    elif not validation_passed:
+        status = 'VALIDATION_FAILED'
+    else:
+        status = 'COMPLETE'
+
+    # Write the canonical machine-readable per-run record (single source of
+    # truth for the dashboard, validators, and reproducibility).
+    git_commit = _git_commit()
+    run_id = f"run_{args.start_date}_to_{args.end_date}_{git_commit}"
+    run_record = {
+        'schema_version': 1,
+        'run_id': run_id,
+        'generated_at': datetime.now().isoformat(timespec='seconds'),
+        'status': status,
+        'git_commit': git_commit,
+        'cli_args': {k: v for k, v in vars(args).items()},
+        'seed': args.seed,
+        'allow_mock': allow_mock,
+        'universe': args.universe,
+        'start_date': args.start_date,
+        'end_date': args.end_date,
+        'social_source': social_source,
+        'data_provenance': {
+            'prices': get_provenance(prices),
+            'factors': get_provenance(factors),
+            'social_source': social_source,
+            'n_events': len(events_data),
+            'n_signals': len(signals_df),
+            'n_positions': int(stats['n_positions']),
+        },
+        'metrics': flat_metrics,
+        'factor': factor_record,
+        'factor_status': factor_status,
+        'portfolio_stats': {k: (float(v) if isinstance(v, (int, float)) else v)
+                            for k, v in stats.items()},
+        'validation': {'passed': validation_passed, 'issues': validation_issues},
+        'paths': {
+            'signals_csv': signals_file,
+            'portfolio_csv': portfolio_file,
+            'equity_csv': equity_file,
+            'tearsheet_txt': tearsheet_file,
+        },
+    }
+    runs_dir = Path('results/runs')
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    run_json_path = runs_dir / f"{run_id}.json"
+    with open(run_json_path, 'w') as f:
+        json.dump(run_record, f, indent=2, default=str)
+    logger.info(f"Saved run record to {run_json_path}")
 
     # Final summary
     logger.info("\n" + "="*60)
-    logger.info("PRODUCTION RUN COMPLETE")
+    logger.info(f"PRODUCTION RUN {status}")
     logger.info("="*60)
     logger.info(f"Events detected: {len(events_data)}")
     logger.info(f"Signals generated: {len(signals_df)}")
     logger.info(f"Portfolio positions: {stats['n_positions']}")
     logger.info(f"Final return: {results.get_total_return()*100:.2f}%")
+    logger.info(f"Data provenance: prices={get_provenance(prices)}, factors={get_provenance(factors)}")
+    logger.info(f"Status: {status}")
+    if validation_issues:
+        logger.info("Validation issues:")
+        for issue in validation_issues:
+            logger.info(f"  {issue}")
     logger.info("="*60)
     date_validator.print_summary()
 
+    # Exit code reflects acceptance: 0 = COMPLETE, non-zero = ran but failed a
+    # gate (validation/factor analysis), so CI and callers can detect it.
+    if status != 'COMPLETE':
+        sys.exit(3)
+
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except DataUnavailableError as e:
+        # Fail-closed: a real-data run could not obtain real data. Abort with a
+        # clear, non-zero exit rather than fabricating or reporting fake results.
+        logging.getLogger(__name__).error("ABORTING (data unavailable): %s", e)
+        print(f"\nABORTING: {e}\n"
+              "A production run will not fabricate data. Fix network/credentials, "
+              "or pass --allow-mock for an explicitly-synthetic demo run.", file=sys.stderr)
+        sys.exit(2)

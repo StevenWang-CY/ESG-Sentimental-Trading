@@ -8,33 +8,49 @@ A dollar-neutral long-short equity strategy that generates alpha by exploiting s
 
 ---
 
-## Performance Highlights
+## Performance
 
-These summary figures and markdown reports are historical outputs from earlier runs. After the January 2026 strategy realignment and the April 2026 production refinements, `run_production.py` plus `config/config.yaml` define the canonical strategy contract, and archived reports should be regenerated before being treated as current.
+**This repository ships no headline performance numbers.** Earlier revisions of
+this README advertised figures (e.g. "+92.84% return / 1.85 Sharpe / 35.94%
+CAGR") that are **not reproducible** from the committed `config/config.yaml` and
+code, and that contradict the committed tear sheets (which show Sharpe ratios in
+roughly the 0.35--0.97 range). Those fabricated figures have been removed.
 
-**Best Backtest** (Jan 2024 -- Dec 2025, 24 months, ESG-sensitive NASDAQ-100):
+Performance must be **regenerated from a real-data run**. The canonical strategy
+contract is defined by `run_production.py` plus `config/config.yaml`; any
+illustrative figure you cite must come from a specific, dated run of that
+entrypoint over a stated universe and date range — not from this document.
 
-| Metric | Strategy | SPY |
-|--------|----------|-----|
-| Total Return | **+92.84%** | +56.39% |
-| CAGR | **35.94%** | ~25% |
-| Sharpe Ratio (naive) | **1.85** | ~1.0 |
-| Sortino Ratio | **3.00** | -- |
-| Max Drawdown | **-9.94%** | ~-10% |
-| Annualized Volatility | 16.24% | ~15% |
-| Calmar Ratio | **3.61** | -- |
+### How to reproduce performance
 
-> **Reporting note (v5.1.0):** the naive Sharpe above is annualized via `sqrt(252)` under the IID assumption. The engine now also reports the Lo (2002) autocorrelation-adjusted Sharpe, the Probabilistic Sharpe Ratio (Bailey & Lopez de Prado, 2012), and the Deflated Sharpe Ratio (Bailey & Lopez de Prado, 2014). After applying Almgren-Chriss market impact, stock borrow costs, and Newey-West HAC alpha standard errors, a realistic live-trading expectation is in the **1.0--1.4 Sharpe** range. See "Production-Grade Refinements (v5.1.0)" below.
+1. Install the package with the required NLP extra (see Quick Start below):
+   `pip install -e ".[nlp]"`
+2. Run a real-data backtest, e.g.:
+   ```bash
+   python run_production.py \
+       --universe esg_nasdaq100 \
+       --social-source multi_source \
+       --start-date 2024-01-01 \
+       --end-date 2025-01-01 \
+       --save-data
+   ```
+3. Inspect the generated tear sheets and metrics under `results/` and the
+   `data/*.csv` artifacts the run writes. Report the metrics from *that* run,
+   tagged with its universe and date range.
 
-**Bear Market Robustness** (Jan 2022 -- Dec 2024, 36 months):
+> **Reporting note (v5.1.0):** the engine reports the naive `sqrt(252)`
+> annualized Sharpe alongside the Lo (2002) autocorrelation-adjusted Sharpe, the
+> Probabilistic Sharpe Ratio (Bailey & Lopez de Prado, 2012), and the Deflated
+> Sharpe Ratio (Bailey & Lopez de Prado, 2014). After applying Almgren-Chriss
+> market impact, stock borrow costs, and Newey-West HAC alpha standard errors, a
+> realistic live-trading expectation is in the **1.0--1.4 Sharpe** range. See
+> "Production-Grade Refinements (v5.1.0)" below. Always prefer the
+> autocorrelation- and selection-bias-adjusted figures when reporting.
 
-| Metric | Strategy | SPY |
-|--------|----------|-----|
-| Total Return | +37.40% | +39.17% |
-| Sharpe Ratio | **0.51** | ~0.5 |
-| Max Drawdown | -30.94% | ~-25% |
-
-An optional **cash/SPY overlay** is supported for portable-alpha style equitization, but it is disabled by default in the canonical baseline configuration. Baseline validation is performed on the pure dollar-neutral book without this overlay.
+An optional **cash/SPY overlay** is supported for portable-alpha style
+equitization, but it is disabled by default in the canonical baseline
+configuration. Baseline validation is performed on the pure dollar-neutral book
+without this overlay.
 
 ---
 
@@ -205,7 +221,7 @@ Signals are converted into portfolio weights under a dollar-neutral constraint:
 - Long and short candidate counts are balanced before exposure normalization.
 - Long and short sides each target 50% gross exposure by default, producing an approximately flat net book.
 - Individual positions are capped at 8% of portfolio value in construction and 10% in the risk layer.
-- The portfolio is rebalanced weekly, and positions are held for 49 days (7 weeks) to capture the full ESG alpha lifecycle: primary alpha (5--10d) + diffusion (10--20d) + institutional rebalancing (20--35d) (Flammer 2013; Khan, Serafeim & Yoon 2016).
+- The portfolio is rebalanced weekly, and positions are held for 49 trading days (~10 weeks) to capture the full ESG alpha lifecycle: primary alpha (5--10d) + diffusion (10--20d) + institutional rebalancing (20--35d) (Flammer 2013; Khan, Serafeim & Yoon 2016).
 
 ---
 
@@ -359,14 +375,19 @@ ESG-Sentimental-Trading/
 ```bash
 python --version  # 3.10+
 python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
 
-# Or install via pyproject.toml
-pip install -e .
-
-# Optional: Install FinBERT for transformer-based sentiment
+# Install the package WITH the NLP extra. This is MANDATORY for any production
+# or multi_source run: the default config (nlp.sentiment_analyzer.mode=hybrid,
+# strict=true) uses FinBERT and fails closed without transformers + torch.
 pip install -e ".[nlp]"
 ```
+
+> **Required:** Do not skip the `[nlp]` extra before running `run_production.py`
+> or any `--social-source multi_source` command. `requirements.txt` and
+> `pip install -e .` alone do NOT install transformers/torch, so the canonical
+> strict hybrid sentiment path will fail closed (this fail-closed behavior is
+> intentional — install the extra rather than disabling it). The `[nlp]` extra
+> is the documented, version-pinned way to satisfy this requirement.
 
 ### Run a Demo
 
@@ -375,6 +396,8 @@ python main.py --mode demo
 ```
 
 ### Production Backtest
+
+> Ensure `pip install -e ".[nlp]"` has been run first (see Prerequisites).
 
 ```bash
 # Multi-source sentiment (free, no credentials needed)
@@ -394,8 +417,13 @@ python run_production.py \
     --end-date 2025-01-01 \
     --save-data
 
-# Re-run with cached data (skips API calls)
-python run_production.py --universe russell_midcap --use-cache
+# Re-run with cached data (skips API calls). --start-date/--end-date are
+# always required; caching is keyed off the universe and date range.
+python run_production.py \
+    --universe russell_midcap \
+    --start-date 2024-01-01 \
+    --end-date 2025-01-01 \
+    --use-cache
 ```
 
 ### Walk-Forward Validation
@@ -403,6 +431,39 @@ python run_production.py --universe russell_midcap --use-cache
 ```bash
 python -m pytest tests/unit/test_walk_forward_validator.py
 ```
+
+### Monitoring Dashboard
+
+An interactive Streamlit dashboard is provided for performance monitoring and
+validation:
+
+```bash
+# Requires the dashboard extra: pip install -e ".[dashboard]"  (or pip install streamlit)
+streamlit run dashboard.py
+```
+
+The dashboard auto-loads the canonical artifacts a run produces — there are no
+hardcoded demo metrics. It discovers the newest run record under
+`results/runs/run_*.json` (and the committed sample under `examples/sample_run/`,
+so it is populated even on a fresh clone) and reads the per-run CSVs that record
+references (`signals_*.csv`, `portfolio_*.csv`, `equity_*.csv`).
+
+Surfaces (tabs):
+
+- **Overview** — run status, last-refresh timestamp, data provenance (with a
+  prominent banner if a run used mock/synthetic data), and real key metrics;
+- **Performance** — equity curve, underwater drawdown, return distribution,
+  and exposure over time (benchmark overlay when the cash overlay is enabled);
+- **Holdings** — current portfolio weights, long/short split, gross/net exposure;
+- **Signals** — per-signal explorer showing the fields that drove each signal;
+- **Proposed Orders** — target-weight deltas between the last two rebalances,
+  exportable as CSV (review/export only — it does **not** execute trades);
+- **Validation** — post-backtest checks against the canonical `strategy_config`;
+- **Run History** — browse and compare prior runs (reproducibility metadata).
+
+Run a backtest first (see Production Backtest above) so a fresh `results/runs/`
+record exists; otherwise the dashboard shows the bundled sample run and a clear
+"no run loaded" empty state.
 
 ---
 
@@ -425,7 +486,7 @@ signals:
 
 portfolio:
   method: "quintile"
-  holding_period: 49               # 7 weeks (full ESG alpha lifecycle)
+  holding_period: 49               # 49 trading days (~10 weeks); full ESG alpha lifecycle
   rebalance_frequency: "W"         # Weekly
   max_position: 0.08               # 8% max per stock
   selection_balance: "equal_count"

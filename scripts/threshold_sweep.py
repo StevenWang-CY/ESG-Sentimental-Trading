@@ -106,6 +106,11 @@ class ThresholdSweep:
 
         log_file = self.results_dir / f"backtest_threshold_{threshold}.log"
 
+        # Snapshot existing run JSONs so we can attribute the one this run
+        # produces (sequential mode). Subprocess stdout/stderr still go to the
+        # per-threshold .log for debugging.
+        runs_before = set(self._existing_run_jsons())
+
         try:
             with open(log_file, 'w') as f:
                 result = subprocess.run(
@@ -118,8 +123,10 @@ class ThresholdSweep:
 
             if result.returncode == 0:
                 logger.info(f"✓ Threshold {threshold} completed successfully")
-                # Parse results from log file
-                metrics = self._parse_backtest_results(log_file)
+                # Parse results: prefer the canonical FLAT run JSON, fall back
+                # to the metrics.py tear sheet (.txt). The Title-Case log labels
+                # parsed previously are emitted by NO producer.
+                metrics = self._parse_backtest_results(runs_before)
                 metrics['threshold'] = threshold
                 metrics['status'] = 'success'
                 return metrics
@@ -134,91 +141,144 @@ class ThresholdSweep:
             logger.error(f"✗ Threshold {threshold} raised exception: {str(e)}")
             return {'threshold': threshold, 'status': 'error', 'error': str(e)}
 
-    def _parse_backtest_results(self, log_file):
+    @staticmethod
+    def _runs_dir() -> Path:
+        """Directory where run_production.py writes canonical run JSONs."""
+        return Path('results/runs')
+
+    def _existing_run_jsons(self):
+        """Return the set of canonical run JSON paths currently on disk."""
+        runs_dir = self._runs_dir()
+        if not runs_dir.exists():
+            return []
+        return list(runs_dir.glob('run_*.json'))
+
+    def _tear_sheet_path(self) -> Path:
+        """Deterministic tear-sheet path written by run_production.py."""
+        return Path(
+            f"results/tear_sheets/tearsheet_{self.start_date}_to_{self.end_date}.txt"
+        )
+
+    def _parse_backtest_results(self, runs_before):
         """
-        Parse backtest results from log file
+        Parse backtest results, preferring the canonical FLAT run JSON.
+
+        Resolution order:
+          1. The newest ``results/runs/run_*.json`` not present in
+             ``runs_before`` (the file this run just produced).
+          2. The newest ``results/runs/run_*.json`` overall.
+          3. The metrics.py tear sheet ``.txt`` (snake_case key equality).
 
         Args:
-            log_file: Path to log file
+            runs_before: Iterable of run JSON paths that existed before this
+                backtest started (used to attribute the freshly-written JSON).
 
         Returns:
-            dict: Parsed metrics
+            dict: Parsed metrics with canonical flat keys.
+        """
+        before = {str(p) for p in (runs_before or [])}
+
+        # 1 & 2: canonical run JSON
+        run_json = self._select_run_json(before)
+        if run_json is not None:
+            try:
+                with open(run_json, 'r') as f:
+                    flat = json.load(f)
+                logger.info(f"Parsed metrics from canonical run JSON: {run_json}")
+                return self._extract_flat_metrics(flat)
+            except Exception as e:
+                logger.warning(f"Error reading run JSON {run_json}: {str(e)}")
+
+        # 3: tear sheet fallback
+        tear_sheet = self._tear_sheet_path()
+        if tear_sheet.exists():
+            logger.info(f"Parsing metrics from tear sheet: {tear_sheet}")
+            return self._parse_tear_sheet(tear_sheet)
+
+        logger.warning(
+            "No canonical run JSON or tear sheet found; metrics will be empty."
+        )
+        return {}
+
+    def _select_run_json(self, before_paths):
+        """Pick the run JSON this backtest produced (newest not in before)."""
+        current = self._existing_run_jsons()
+        new_runs = [p for p in current if str(p) not in before_paths]
+        pool = new_runs if new_runs else current
+        if not pool:
+            return None
+        return max(pool, key=lambda p: p.stat().st_mtime)
+
+    @staticmethod
+    def _extract_flat_metrics(flat: dict) -> dict:
+        """Pull the metrics the sweep plots/optimizes from the flat run dict.
+
+        Reads canonical keys directly: sharpe_ratio, sortino_ratio, turnover
+        (annualized), num_trades, with total_return / max_drawdown taken from
+        their percent variants for plotting.
         """
         metrics = {}
+        if 'sharpe_ratio' in flat:
+            metrics['sharpe_ratio'] = float(flat['sharpe_ratio'])
+        if 'sortino_ratio' in flat:
+            metrics['sortino_ratio'] = float(flat['sortino_ratio'])
+        if 'turnover' in flat:
+            metrics['turnover'] = float(flat['turnover'])
+        if 'volatility_pct' in flat:
+            metrics['volatility'] = float(flat['volatility_pct'])
+        elif 'volatility' in flat:
+            metrics['volatility'] = float(flat['volatility']) * 100.0
+        if 'total_return_pct' in flat:
+            metrics['total_return'] = float(flat['total_return_pct'])
+        elif 'total_return' in flat:
+            metrics['total_return'] = float(flat['total_return']) * 100.0
+        if 'max_drawdown_pct' in flat:
+            metrics['max_drawdown'] = float(flat['max_drawdown_pct'])
+        elif 'max_drawdown' in flat:
+            metrics['max_drawdown'] = float(flat['max_drawdown']) * 100.0
+        if flat.get('num_trades') is not None:
+            metrics['num_trades'] = int(flat['num_trades'])
+        return metrics
 
+    @staticmethod
+    def _parse_tear_sheet(tear_sheet_path) -> dict:
+        """Parse a metrics.py tear sheet (.txt) anchoring on snake_case keys.
+
+        metrics.py ``save_tear_sheet`` writes ``f"{key:30s}: {value}"`` with
+        left-justified snake_case keys, so match on EXACT key equality
+        (``line.split(':')[0].strip() == 'sharpe_ratio'``) rather than the
+        Title-Case labels no producer emits. Ratios are plain floats; risk and
+        return metrics are percent-formatted (trailing ``%``).
+        """
+        metrics = {}
+        ratio_keys = {'sharpe_ratio', 'sortino_ratio'}
         try:
-            with open(log_file, 'r') as f:
-                log_content = f.read()
+            with open(tear_sheet_path, 'r') as f:
+                content = f.read()
 
-            # Extract key metrics using string parsing
-            # Look for performance summary section
-
-            # Total Return
-            if 'Total Return:' in log_content:
-                for line in log_content.split('\n'):
-                    if 'Total Return:' in line:
-                        value = line.split(':')[1].strip().replace('%', '')
-                        metrics['total_return'] = float(value)
-                        break
-
-            # Sharpe Ratio
-            if 'Sharpe Ratio:' in log_content:
-                for line in log_content.split('\n'):
-                    if 'Sharpe Ratio:' in line:
-                        value = line.split(':')[1].strip()
-                        metrics['sharpe_ratio'] = float(value)
-                        break
-
-            # Sortino Ratio
-            if 'Sortino Ratio:' in log_content:
-                for line in log_content.split('\n'):
-                    if 'Sortino Ratio:' in line:
-                        value = line.split(':')[1].strip()
-                        metrics['sortino_ratio'] = float(value)
-                        break
-
-            # Max Drawdown
-            if 'Max Drawdown:' in log_content:
-                for line in log_content.split('\n'):
-                    if 'Max Drawdown:' in line:
-                        value = line.split(':')[1].strip().replace('%', '')
-                        metrics['max_drawdown'] = float(value)
-                        break
-
-            # Volatility
-            if 'Volatility:' in log_content:
-                for line in log_content.split('\n'):
-                    if 'Volatility:' in line and 'Ann' not in line:
-                        value = line.split(':')[1].strip().replace('%', '')
-                        metrics['volatility'] = float(value)
-                        break
-
-            # Turnover
-            if 'Turnover:' in log_content:
-                for line in log_content.split('\n'):
-                    if 'Turnover:' in line:
-                        value = line.split(':')[1].strip().replace('x', '')
-                        metrics['turnover'] = float(value)
-                        break
-
-            # Number of trades
-            if 'Total Trades:' in log_content or 'Number of Trades:' in log_content:
-                for line in log_content.split('\n'):
-                    if 'Total Trades:' in line or 'Number of Trades:' in line:
-                        value = line.split(':')[1].strip()
-                        metrics['num_trades'] = int(value)
-                        break
-
-            # Number of ESG events detected
-            if 'ESG events detected:' in log_content or 'Events detected:' in log_content:
-                for line in log_content.split('\n'):
-                    if 'ESG events detected:' in line or 'Events detected:' in line:
-                        value = line.split(':')[1].strip()
-                        metrics['num_events'] = int(value)
-                        break
+            for line in content.split('\n'):
+                if ':' not in line:
+                    continue
+                key = line.split(':')[0].strip()
+                value = line.split(':', 1)[1].strip()
+                try:
+                    if key in ratio_keys:
+                        metrics[key] = float(value)
+                    elif key == 'turnover':
+                        metrics['turnover'] = float(value.replace('x', '').replace(',', ''))
+                    elif key == 'num_trades':
+                        metrics['num_trades'] = int(float(value.replace(',', '')))
+                    elif key == 'total_return':
+                        metrics['total_return'] = float(value.replace('%', '').replace(',', ''))
+                    elif key == 'max_drawdown':
+                        metrics['max_drawdown'] = float(value.replace('%', '').replace(',', ''))
+                    elif key == 'annualized_volatility':
+                        metrics['volatility'] = float(value.replace('%', '').replace(',', ''))
+                except ValueError:
+                    continue
 
         except Exception as e:
-            logger.warning(f"Error parsing metrics from {log_file}: {str(e)}")
+            logger.warning(f"Error parsing tear sheet {tear_sheet_path}: {str(e)}")
 
         return metrics
 

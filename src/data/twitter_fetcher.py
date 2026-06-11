@@ -3,31 +3,18 @@ Twitter/X Data Fetcher
 Fetches tweets related to stock tickers and ESG events using Twitter API v2
 """
 
-import os
+import logging
+import zlib
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import time
 
+from src.utils.provenance import REAL, MOCK, EMPTY, tag, DataUnavailableError
+from src.utils.config_loader import resolve_credential, is_unset
 
-def _load_credential(value: Optional[str], env_var: str) -> Optional[str]:
-    """
-    Load credential from value or environment variable.
-
-    If value is None, empty, or looks like a placeholder (contains ${...}),
-    try to load from environment variable instead.
-
-    Args:
-        value: Value from config file
-        env_var: Name of environment variable to check
-
-    Returns:
-        Credential value or None
-    """
-    if value and not value.startswith('${'):
-        return value
-    return os.environ.get(env_var)
+logger = logging.getLogger(__name__)
 
 
 class TwitterFetcher:
@@ -44,28 +31,45 @@ class TwitterFetcher:
             bearer_token: Twitter API v2 Bearer Token (or will load from TWITTER_BEARER_TOKEN env var)
             use_mock: If True, generate mock data instead of real API calls
         """
-        # Load credentials from environment variables if not provided or if placeholder
-        self.bearer_token = _load_credential(bearer_token, 'TWITTER_BEARER_TOKEN')
+        # Load credentials from environment variables if not provided or if placeholder.
+        # resolve_credential treats ${...} placeholders and empty values as unset and
+        # falls back to the named env var, so both .env and process env work.
+        self.bearer_token = resolve_credential(bearer_token, 'TWITTER_BEARER_TOKEN')
         self.use_mock = use_mock
         self.client = None
 
-        if not use_mock and self.bearer_token:
-            try:
-                import tweepy
-                self.client = tweepy.Client(bearer_token=self.bearer_token, wait_on_rate_limit=True)
-                print("Twitter API client initialized successfully.")
-            except ImportError:
-                print("Warning: tweepy not installed. Install with: pip install tweepy")
-                print("Falling back to mock data mode.")
-                self.use_mock = True
-            except Exception as e:
-                print(f"Warning: Failed to initialize Twitter client: {e}")
-                print("Falling back to mock data mode.")
-                self.use_mock = True
-        else:
-            if not use_mock:
-                print("Warning: No Twitter bearer token provided. Using mock data.")
-            self.use_mock = True
+        if use_mock:
+            # Explicit demo/test mode: caller opted in to synthetic data.
+            return
+
+        # Production mode (use_mock=False): fail closed rather than fabricating data.
+        # 1. Bearer token must be present.
+        if is_unset(self.bearer_token):
+            raise DataUnavailableError(
+                "TwitterFetcher(use_mock=False) requires a real Twitter API bearer token. "
+                "Set TWITTER_BEARER_TOKEN in your environment or .env (or pass bearer_token), "
+                "or construct with use_mock=True for a demo run."
+            )
+
+        # 2. The tweepy client must initialize. If not, we cannot fetch real data --
+        #    raise instead of silently switching to mock.
+        try:
+            import tweepy
+        except ImportError as e:
+            raise DataUnavailableError(
+                "TwitterFetcher(use_mock=False) requires the 'tweepy' package. "
+                "Install it with: pip install tweepy"
+            ) from e
+
+        try:
+            self.client = tweepy.Client(bearer_token=self.bearer_token, wait_on_rate_limit=True)
+            logger.info("Twitter API client initialized successfully.")
+        except Exception as e:
+            self.client = None
+            raise DataUnavailableError(
+                f"TwitterFetcher(use_mock=False): failed to initialize the Twitter client: {e}. "
+                f"Check the bearer token and network; refusing to fall back to mock data."
+            ) from e
 
     def fetch_tweets_for_event(self, ticker: str, event_date: datetime,
                                  keywords: Optional[List[str]] = None,
@@ -87,7 +91,8 @@ class TwitterFetcher:
             DataFrame with columns: [timestamp, text, user_followers, retweets, likes, ticker]
         """
         if self.use_mock:
-            return self._generate_mock_tweets(ticker, event_date, days_before, days_after, max_results)
+            mock_df = self._generate_mock_tweets(ticker, event_date, days_before, days_after, max_results)
+            return tag(mock_df, MOCK, source='twitter')
 
         # Build search query
         query = self._build_search_query(ticker, keywords)
@@ -111,8 +116,9 @@ class TwitterFetcher:
             )
 
             if tweets.data is None:
-                print(f"No tweets found for {ticker} around {event_date}")
-                return pd.DataFrame(columns=['timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker'])
+                logger.warning("No tweets found for %s around %s", ticker, event_date)
+                empty_df = pd.DataFrame(columns=['timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker'])
+                return tag(empty_df, EMPTY, source='twitter')
 
             # Create user lookup dictionary
             users = {user.id: user for user in tweets.includes.get('users', [])}
@@ -130,14 +136,20 @@ class TwitterFetcher:
                 })
 
             df = pd.DataFrame(tweets_data)
-            print(f"Fetched {len(df)} tweets for {ticker}")
+            logger.info("Fetched %d tweets for %s", len(df), ticker)
 
-            return df
+            return tag(df, REAL, source='twitter')
 
         except Exception as e:
-            print(f"Error fetching tweets: {e}")
-            print("Falling back to mock data.")
-            return self._generate_mock_tweets(ticker, event_date, days_before, days_after, max_results)
+            # SOFT no-data: a per-event fetch failure must NOT fabricate rows on a
+            # production run. Return an EMPTY tagged frame and warn so the caller can
+            # skip this event; the orchestrator guard handles aborting if needed.
+            logger.warning(
+                "Error fetching tweets for %s around %s: %s. "
+                "Returning empty result (no mock fallback).", ticker, event_date, e
+            )
+            empty_df = pd.DataFrame(columns=['timestamp', 'text', 'user_followers', 'retweets', 'likes', 'ticker'])
+            return tag(empty_df, EMPTY, source='twitter')
 
     def fetch_tweets_batch(self, tickers: List[str], event_dates: Dict[str, datetime],
                             keywords: Optional[List[str]] = None,
@@ -224,7 +236,9 @@ class TwitterFetcher:
         Returns:
             DataFrame with mock tweet data
         """
-        np.random.seed(hash(ticker) % 2**32)
+        # Local deterministic RNG keyed on ticker (no global np.random.seed mutation,
+        # stable across processes). Only reachable when use_mock=True.
+        rng = np.random.default_rng(zlib.crc32(str(ticker).encode()))
 
         # Generate timestamps with more activity post-event
         start_date = event_date - timedelta(days=days_before)
@@ -276,19 +290,19 @@ class TwitterFetcher:
             esg_templates['positive'] * 3
         )
 
-        texts = np.random.choice(all_templates, n_tweets)
+        texts = rng.choice(all_templates, n_tweets)
 
         # Generate realistic engagement metrics
         # Followers: log-normal distribution (most users have few followers, some have many)
-        user_followers = np.random.lognormal(mean=7, sigma=2, size=n_tweets).astype(int)
+        user_followers = rng.lognormal(mean=7, sigma=2, size=n_tweets).astype(int)
         user_followers = np.clip(user_followers, 10, 1000000)
 
         # Retweets and likes: influenced by follower count
-        base_retweets = np.random.poisson(lam=5, size=n_tweets)
+        base_retweets = rng.poisson(lam=5, size=n_tweets)
         follower_boost = (np.log10(user_followers) / 3).astype(int)
         retweets = base_retweets + follower_boost
 
-        likes = retweets * np.random.uniform(2, 5, n_tweets)
+        likes = retweets * rng.uniform(2, 5, n_tweets)
 
         # Create DataFrame
         mock_data = pd.DataFrame({
